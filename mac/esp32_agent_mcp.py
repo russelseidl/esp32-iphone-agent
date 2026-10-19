@@ -460,7 +460,7 @@ async def _find_pointer(self: Link, near_right_edge: bool = False) -> tuple[floa
     return found[1] if found else None
 
 
-async def _frame_changed(self: Link, before: Frame, wait_s: float = 2.5, min_change: float = 0.25) -> bool | None:
+async def _frame_changed(self: Link, before: Frame, wait_s: float = 8.0, min_change: float = 0.25) -> bool | None:
     """Did at least min_change of the screen change relative to `before` within wait_s? Compares only live
     frames; None when no live frame arrived in time (the mirror was replaying), i.e. unverified."""
     deadline = time.monotonic() + wait_s
@@ -476,11 +476,13 @@ async def _frame_changed(self: Link, before: Frame, wait_s: float = 2.5, min_cha
     return False if seen_live else None
 
 
-async def _keyboard_up(self: Link, wait_s: float = 2.0) -> bool:
+async def _keyboard_up(self: Link, wait_s: float = 6.0) -> bool:
+    """Is the on-screen keyboard showing in a live frame within wait_s? A screen change bursts frames and the
+    BLE link needs a few seconds to catch up, so stale frames are skipped rather than trusted."""
     deadline = time.monotonic() + wait_s
     while True:
-        png, _ = await self.frame(timeout=1.5)
-        if keyboard_visible(Frame.from_jpeg(png)):
+        png, lag = await self.frame(timeout=1.5)
+        if lag["live"] and keyboard_visible(Frame.from_jpeg(png)):
             return True
         if time.monotonic() >= deadline:
             return False
@@ -914,15 +916,19 @@ async def type_text(text: str, fix_caps: bool = True) -> str:
     hardware keyboard; with fix_caps the first character is retyped afterwards so the text is sent exactly."""
     if not text.isascii():
         raise RuntimeError("the board types ASCII only")
-    if not await link.keyboard_up(2.0):
+    if not await link.keyboard_up(6.0):
         TELEMETRY.event("nav", action="type_text", ok=False, why="no keyboard")
         return "no effect: no keyboard is showing; tap a text field first, then type"
     await link.cmd(f"type {text}")
     if fix_caps and text[:1].islower():
-        await link.cmd("key cmd+left")
-        await link.cmd("key right")
-        await link.cmd("key backspace")
+        # select the first character and retype it; harmless where iOS did not capitalise. Key presses need
+        # a short gap or iOS drops the arrow (seen as a doubled first letter).
+        for combo in ("cmd+left", "shift+right"):
+            await asyncio.sleep(0.2)
+            await link.cmd(f"key {combo}")
+        await asyncio.sleep(0.2)
         await link.cmd(f"type {text[0]}")
+        await asyncio.sleep(0.2)
         await link.cmd("key cmd+right")
     TELEMETRY.event("nav", action="type_text", chars=len(text), ok=True)
     return _ok(f"typed {len(text)} chars")
@@ -976,7 +982,16 @@ async def open_app(name: str) -> str:
     await asyncio.sleep(0.8)
     home_frame = await link._settled_frame()
     await link.cmd("key cmd+space")
-    if not await link.keyboard_up(2.5):
+    opened = await link.keyboard_up(3.0)
+    if not opened:  # system shortcuts were seen to stop being honoured mid-session: tap the Search pill instead
+        NOTES.learn("home", "cmd+space", False)
+        await phone.tap(500, 822, precise=True)
+        opened = await link.keyboard_up(6.0)
+        if opened:
+            TELEMETRY.event("nav", action="open_app", name=name, via="search pill")
+    else:
+        NOTES.learn("home", "cmd+space", True)
+    if not opened:
         TELEMETRY.event("nav", action="open_app", name=name, ok=False, why="search did not open")
         return "no effect: Search did not open from the Home Screen (is the phone unlocked on the Home Screen?)"
     await link.cmd(f"type {name}")
@@ -1002,7 +1017,7 @@ async def search_in_app(text: str, app: str = "") -> str:
             continue
         await link.cmd(f"key {combo}")
         tried.append(combo)
-        if await link.keyboard_up(2.0):
+        if await link.keyboard_up(4.0):
             if app:
                 NOTES.learn(app, combo, True)
             await link.cmd(f"type {text}")
