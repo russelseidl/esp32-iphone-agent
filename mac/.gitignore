@@ -1,0 +1,5 @@
+.deps/
+ESP32AgentMCP.app/
+.*.jpg
+.*.png
+.*.py
