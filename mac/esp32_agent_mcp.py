@@ -32,6 +32,9 @@ from pathlib import Path
 from bleak import BleakClient, BleakScanner
 from mcp.server.mcpserver import MCPServer, Image
 
+from telemetry import Telemetry
+from watchdog import StuckDetector, backoff
+
 # stdout is the MCP transport: log to stderr only
 logging.basicConfig(stream=sys.stderr, level=os.environ.get("ESP32_AGENT_LOG", "INFO"),
                     format="%(asctime)s %(levelname)s %(message)s")
@@ -43,6 +46,7 @@ START, END, IDR, CONFIG, BENCH, SNAP = 1, 2, 4, 8, 16, 32
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 HOME = Path(os.environ.get("ESP32_AGENT_HOME", "~/.esp32-agent")).expanduser()
 CAL_FILE = HOME / "calibration.json"
+TELEMETRY = Telemetry(HOME / "telemetry.jsonl")
 SCAN_TIMEOUT = float(os.environ.get("ESP32_AGENT_SCAN", "15"))
 KEEP_AWAKE_S = float(os.environ.get("ESP32_AGENT_KEEPAWAKE", "20"))  # idle seconds between pointer nudges; 0 = off
 
@@ -215,6 +219,7 @@ class Link:
             await client.start_notify(VIDEO, lambda _, d: self.video.feed(bytes(d)))
             self.client, self.name, self.links = client, dev.name, self.links + 1
             log.info("connected to %s (%s), mtu %s", dev.name, dev.address, client.mtu_size)
+            TELEMETRY.event("link", state="connected", name=dev.name, mtu=client.mtu_size)
             await self._cmd("stream on")  # keep the mirror flowing into the decoder for as long as we are linked
             if KEEP_AWAKE_S and (self._keeper is None or self._keeper.done()):
                 self._keeper = asyncio.create_task(self._keep_awake())
@@ -238,6 +243,7 @@ class Link:
 
     def _on_disconnect(self, _):
         log.warning("board disconnected")
+        TELEMETRY.event("link", state="disconnected")
         for fut in self.pending.values():
             if not fut.done():
                 fut.set_exception(RuntimeError("board disconnected"))
@@ -248,6 +254,7 @@ class Link:
         rid, _, rest = text.partition(" ")
         if rid in ("log", "app"):
             log.info("[%s] %s", rid, rest)
+            TELEMETRY.event("boardlog", text=rest)
             return
         fut = self.pending.pop(rid, None)
         if fut and not fut.done():
@@ -291,8 +298,10 @@ class Link:
             reply = await asyncio.wait_for(fut, timeout or self._timeout(line))
         except asyncio.TimeoutError:
             self.pending.pop(rid, None)
+            TELEMETRY.event("cmd", line=line, reply=None, ms=None, timeout=True)
             raise RuntimeError(f"no reply from the board to '{line}' (link busy or dropped)")
         self.last_cmd_at = time.monotonic()
+        TELEMETRY.event("cmd", line=line, reply=reply, ms=round((time.monotonic() - t0) * 1000, 1))
         log.debug("%s -> %s (%.0f ms)", line, reply, (time.monotonic() - t0) * 1000)
         if reply.startswith("err"):
             raise RuntimeError(f"board: {reply}")
@@ -548,6 +557,15 @@ async def status() -> str:
 
 
 @mcp.tool()
+async def diagnostics(n: int = 50) -> str:
+    """The last n telemetry events (commands with round-trip times, frames, link changes, board log lines,
+    recoveries) and the running counters. Use it to find out what happened when something misbehaved."""
+    st = link.status
+    return json.dumps({"counters": dict(TELEMETRY.counters), "board": {"hid": st.get("hid"), "ble": st.get("ble"),
+                       "logdrop": st.get("logdrop")}, "events": TELEMETRY.recent(n)}, default=str)
+
+
+@mcp.tool()
 async def hotspot_info() -> str:
     """The board's Wi-Fi hotspot name and password (the iPhone joins it so it can mirror its screen to the board).
     The first call pairs the Mac with the board over Bluetooth (macOS shows a pairing prompt: accept it)."""
@@ -558,7 +576,12 @@ async def hotspot_info() -> str:
 async def screenshot():
     """The iPhone's screen right now (from the AirPlay mirror), as a PNG. Coordinates for tap/swipe are 0-1000 of
     this image's width/height. Needs the phone to be mirroring to 'ESP32 Agent'."""
-    return shot(*await link.frame())
+    png, lag = await link.frame()
+    TELEMETRY.event("frame", live=lag["live"], mirroring=lag["mirroring"], replay_bytes=lag["replay_bytes_to_go"],
+                    age_s=lag["newest_frame_age_s"], pending=lag["pending_decodes"])
+    if not lag["live"]:
+        TELEMETRY.count("stale_screenshots")
+    return shot(png, lag)
 
 
 CAL_FIRST = (60, 100)  # mouse units of the first calibration stop, from the homed top-left corner
