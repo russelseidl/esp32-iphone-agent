@@ -1174,6 +1174,21 @@ async def _apply_setting(axis: str, value: str) -> None:
         await phone.calibrate_auto()  # the pointer map depends on both
 
 
+async def _clean_canvas() -> Frame:
+    """A frame with no mark near a planned tap. The previous setting's undos take a moment to render; a
+    'before' frame that still shows its marks hides the next setting's marks, which land within 20 units of
+    them (measured: only the one target where the two settings differed most was ever counted)."""
+    deadline = time.monotonic() + 8
+    fr = None
+    while time.monotonic() < deadline:
+        fr = await link._fresh_frame(link.board_now(), wait_s=3) or fr
+        if fr is not None and not any(abs(d[0] - px) + abs(d[1] - py) < 60
+                                      for d in (find_dots(fr) or []) for px, py in BENCH_PLAN):
+            return fr
+    log.warning("bench: the canvas did not come clean; the next setting's marks may be hidden")
+    return fr or Frame.from_jpeg((await link.frame())[0])
+
+
 @mcp.tool()
 async def bench(axes: list[str] = ["aim", "pace", "coex"], taps_per_setting: int = 5) -> str:
     """A/B bench: with a blank Freeform board open and its pen selected, taps a planned grid per setting,
@@ -1191,7 +1206,7 @@ async def bench(axes: list[str] = ["aim", "pace", "coex"], taps_per_setting: int
         for axis in axes:
             for value in BENCH_AXES[axis]:
                 await _apply_setting(axis, value)
-                before = Frame.from_jpeg((await link.frame())[0])
+                before = await _clean_canvas()
                 drops0 = int(link.status.get("ble", {}).get("drop", 0))
                 lat = []
                 for (x, y) in BENCH_PLAN[:taps_per_setting]:
