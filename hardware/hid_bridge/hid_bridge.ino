@@ -20,8 +20,11 @@
 #include "boardlog.h"
 #include "src/airplay/airplay.h"
 
-const int STEP = 10;      // max pointer delta per report while moving
-const int STEP_MS = 8;    // report interval; constant pace keeps iOS acceleration predictable
+#include "src/hid/hidretry.h"
+static int STEP = 10;      // max pointer delta per report while moving (`pace` changes it at run time)
+static int STEP_MS = 8;    // report interval; constant pace keeps iOS acceleration predictable
+const int RELEASE_TRIES = 5, RELEASE_GAP_MS = 20;
+static uint32_t hidFail, hidRel;  // reports that never went out; release retries that were needed
 const int HOME_REPORTS = 50;
 #ifndef DEBUG_SERIAL
 #define DEBUG_SERIAL 0  // 1: echo commands and the AirPlay handshake over USB serial
@@ -66,11 +69,11 @@ bool pressCombo(String combo) {
   combo += '+';
   for (int i; (i = combo.indexOf('+')) >= 0; combo = combo.substring(i + 1)) {
     uint8_t c = keyCode(combo.substring(0, i));
-    if (!c) { keyboard.releaseAll(); return false; }
+    if (!c) { releaseKeys(); return false; }
     keyboard.press(c);
   }
   delay(30);
-  keyboard.releaseAll();
+  releaseKeys();
   return true;
 }
 
@@ -82,6 +85,29 @@ bool usbReady() {
     for (int i = 0; i < 50 && tud_suspended(); i++) delay(10);
   }
   return tud_mounted() && !tud_suspended();
+}
+
+// The core's mouse.release()/keyboard.releaseAll() drop the report silently when the host does not take
+// it within 100 ms; iOS then keeps the button held and every later move becomes a drag. Resend the
+// all-up report until the HID layer confirms delivery.
+static bool sendMouseUp(void *) {
+  hid_mouse_report_t r = {.buttons = 0, .x = 0, .y = 0, .wheel = 0, .pan = 0};
+  return mouse.sendReport(r);
+}
+static void hidWait(int ms) { delay(ms); }
+
+static void releaseMouse() {
+  mouse.release(MOUSE_LEFT);  // keeps the core's own button state in sync
+  int retries = hid_send_confirmed(sendMouseUp, NULL, RELEASE_TRIES, RELEASE_GAP_MS, hidWait);
+  if (retries < 0) { hidFail++; boardLog("hid: mouse release not delivered"); }
+  else if (retries > 0) { hidRel += retries; boardLog("hid: mouse release after %d retries", retries); }
+}
+
+static void releaseKeys() {
+  keyboard.releaseAll();           // the core gives no delivery result for keys: send twice, 20 ms apart
+  delay(RELEASE_GAP_MS);
+  KeyReport none = {};
+  keyboard.sendReport(&none);
 }
 
 String run(const String &line) {
@@ -99,8 +125,8 @@ String run(const String &line) {
   }
   if (cmd == "move") { movePaced(a, b); return "ok"; }
   if (cmd == "press") { mouse.press(MOUSE_LEFT); return "ok"; }
-  if (cmd == "release") { mouse.release(MOUSE_LEFT); return "ok"; }
-  if (cmd == "click") { mouse.press(MOUSE_LEFT); delay(60); mouse.release(MOUSE_LEFT); return "ok"; }
+  if (cmd == "release") { releaseMouse(); return "ok"; }
+  if (cmd == "click") { mouse.press(MOUSE_LEFT); delay(60); releaseMouse(); return "ok"; }
   if (cmd == "scroll") { mouse.move(0, 0, a, b); return "ok"; }
   if (cmd == "type") { keyboard.print(arg); return "ok"; }
   if (cmd == "key") return pressCombo(arg) ? "ok" : "err unknown key";
@@ -168,22 +194,30 @@ String board(const String &line, const String &id) {
     ble_unpair();
     return "";
   }
+  if (cmd == "pace") {  // move pacing: STEP units per report, STEP_MS between reports (not stored)
+    if (n < 2 || !pace_valid(a, b)) return "err usage: pace STEP(1-127) STEP_MS(1-50)";
+    STEP = a;
+    STEP_MS = b;
+    return "ok";
+  }
   return run(line);
 }
 
 String statusJson(bool full) {
   static const char *apStates[] = {"idle", "connected", "streaming"};
   VideoStats v = video_stats();
-  char s[384];
+  char s[448];
   snprintf(s, sizeof s,
            "{\"up\":%lu,\"rst\":\"%s\",\"heap\":%u,\"psram\":%u,\"usb\":\"%s\",\"net\":\"%s\",\"ip\":\"%s\",\"sta\":%d,"
            "\"ap\":\"%s\",\"w\":%u,\"h\":%u,\"kbps\":%lu,\"fps\":%.1f,\"idr\":%lu,\"gop\":%lu,"
-           "\"ble\":{\"mtu\":%u,\"phy\":%u,\"kbps\":%lu,\"drop\":%lu,\"rdrop\":%lu,\"n\":%d}}",
+           "\"ble\":{\"mtu\":%u,\"phy\":%u,\"kbps\":%lu,\"drop\":%lu,\"rdrop\":%lu,\"n\":%d},"
+           "\"hid\":{\"fail\":%lu,\"rel\":%lu},\"logdrop\":%lu}",
            millis(), resetReason(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), usbState(), net_mode(), net_ip().c_str(), net_peers(),
            apStates[airplay_state()], cfg_width(), cfg_height(), (unsigned long)v.kbps, v.fps, (unsigned long)v.idr_ms,
            (unsigned long)v.gop_bytes, ble_mtu(), ble_phy(), (unsigned long)ble_kbps(), (unsigned long)ble_drops(),
-           (unsigned long)ble_reply_drops(), ble_peers());
+           (unsigned long)ble_reply_drops(), ble_peers(), (unsigned long)hidFail, (unsigned long)hidRel,
+           (unsigned long)boardLogDropped());
   if (full) return s;
   // MTU below ~250 (before the MTU exchange): keep only the fields the app needs to stay alive
   snprintf(s, sizeof s, "{\"up\":%lu,\"rst\":\"%s\",\"usb\":\"%s\",\"net\":\"%s\",\"ap\":\"%s\",\"ble\":{\"mtu\":%u}}",
@@ -245,8 +279,8 @@ void loop() {
   esp_task_wdt_reset();
   net_poll();
   if (linked && !ble_connected()) {
-    mouse.release(MOUSE_LEFT);  // a gesture cut off mid-way must not leave the button held (long press)
-    keyboard.releaseAll();
+    releaseMouse();  // a gesture cut off mid-way must not leave the button held (long press)
+    releaseKeys();
     video_stream(false);
   }
   linked = ble_connected();
