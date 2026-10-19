@@ -56,7 +56,7 @@ REHOME_EVERY = 10       # gestures between re-homing (cancels drift of the relat
 # Re-homing: a paced move far past the top-left corner (iOS clamps the pointer there). The board's `home`
 # command fires 50 unpaced (-127,-127) reports 2 ms apart, and iOS 26 was seen dropping most of them (with
 # the on-screen keyboard up), which left every following tap starting from the wrong place.
-HOME_CMD = "move -3000 -3000"
+HOME_CMD = "move -600 -1200"  # the screen is ~270 x 620 units from the corner; this is ~1 s of paced travel
 HOLD = 0.25             # rest before lifting a swipe, so iOS adds no momentum
 TAP_GAP = 0.15          # stay still after a click, so iOS sees a tap and not the start of a drag
 
@@ -393,48 +393,67 @@ class Link:
 
 # ---- pointer finding (Link methods, bound below) -------------------------------------------------------
 
-NUDGE = 12          # mouse units the pointer is wiggled by to find it
+NUDGE = 30          # mouse units the pointer is wiggled by to find it (12 barely moved it: tiny moves travel less)
 SETTLE_S = 1.5      # max wait for a still screen
-FRESH_S = 1.2       # max wait for a frame after the nudge
+FRESH_S = 2.5       # max wait for a frame after the nudge
 
 
 async def _settled_frame(self: Link) -> Frame:
     """A frame taken when two consecutive frames barely differ (the screen is still)."""
     deadline = time.monotonic() + SETTLE_S
-    prev = Frame.from_jpeg((await self.frame())[0])
+    png, lag = await self.frame()
+    if not lag["live"]:
+        raise RuntimeError("the mirror is not live (replaying or stopped); try again in a moment")
+    prev = Frame.from_jpeg(png)
     while time.monotonic() < deadline:
         await asyncio.sleep(0.25)
         cur = Frame.from_jpeg((await self.frame())[0])
-        if changed_fraction(prev, cur) < 0.002:
+        if changed_fraction(prev, cur) < 0.004:  # a ticking clock icon alone is ~0.3%
             return cur
         prev = cur
     return prev
 
 
-async def _find_pointer(self: Link, near_right_edge: bool = False) -> tuple[float, float] | None:
-    """Where the pointer is now, as screen fractions; None if it could not be told apart from the screen.
-    Nudges right (left near the right edge) and back; the pointer ends where it started."""
-    sign = -1 if near_right_edge else 1
-    before = await self._settled_frame()
-    await self._cmd(f"move {sign * NUDGE} 0")
-    t_sent = time.monotonic()
-    after = None
+async def _fresh_frame(self: Link, after_board_ms: int) -> Frame | None:
+    """The first frame the phone captured after board time `after_board_ms` (plus the phone's own encode
+    latency), or None within FRESH_S. Decode time is useless here: the mirror runs ~0.5 s behind."""
     deadline = time.monotonic() + FRESH_S
     while time.monotonic() < deadline:
-        await asyncio.sleep(0.15)
-        if self.decoder.at > t_sent + 0.2:
-            after = Frame.from_jpeg(self.decoder.png)
-            break
+        await asyncio.sleep(0.1)
+        if self.decoder.frame_ts >= after_board_ms + 150:
+            return Frame.from_jpeg(self.decoder.png)
+    return None
+
+
+async def _find_pointer(self: Link, near_right_edge: bool = False) -> tuple[float, float] | None:
+    """Where the pointer is now, as screen fractions; None if it could not be told apart from the screen.
+    iOS hides an idle pointer, so: nudge out (it shows and moves), capture, nudge back, capture; the two
+    footprints between those frames give the position, the one opposite the second nudge being the current."""
+    sign = -1 if near_right_edge else 1
+    await self._settled_frame()  # live and still
+    await self._cmd(f"move {sign * NUDGE} 0")
+    out = await self._fresh_frame(self.board_now())
     await self._cmd(f"move {-sign * NUDGE} 0")
-    if after is None:
-        TELEMETRY.event("pointer", found=False, why="no fresh frame after the nudge")
+    back = await self._fresh_frame(self.board_now())
+    if out is None or back is None:
+        TELEMETRY.event("pointer", found=False, why="no fresh frame after a nudge")
         return None
-    found = locate(before, after, sign)
-    TELEMETRY.event("pointer", found=found is not None, at=found[0] if found else None)
-    return found[0] if found else None
+    found = locate(out, back, -sign)  # out -> back moved by -sign
+    TELEMETRY.event("pointer", found=found is not None, at=found[1] if found else None,
+                    changed=round(changed_fraction(out, back), 4))
+    if found is None:  # keep the pair for inspection (last 20 misses)
+        d = HOME / "debug"
+        d.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%H%M%S")
+        (d / f"pointer-{stamp}-out.jpg").write_bytes(out.jpeg)
+        (d / f"pointer-{stamp}-back.jpg").write_bytes(back.jpeg)
+        for old_file in sorted(d.glob("pointer-*.jpg"))[:-40]:
+            old_file.unlink()
+    return found[1] if found else None
 
 
 Link._settled_frame = _settled_frame
+Link._fresh_frame = _fresh_frame
 Link.find_pointer = _find_pointer
 
 
@@ -522,9 +541,15 @@ class Phone:
         self._pos, self._moves = (tx, ty), self._moves + 1
 
     async def point(self, x: float, y: float):
+        """Put the pointer at x, y (0-1000) with one move from the homed corner. iOS ramps each separate move
+        up, losing a near-constant 10-20 units at its start, so a chain of relative moves drifts; one move from
+        a known corner is what the calibration measured and lands the same way every time."""
         if not self.calibrated:
-            raise RuntimeError("pointer not calibrated: calibrate_start, calibrate_move, then calibrate_fit")
-        await self._move_to(self._dx(x), self._dy(y))
+            raise RuntimeError("pointer not calibrated: run calibrate_auto")
+        await self.link.cmd("release")
+        await self.link.cmd(HOME_CMD)
+        self._pos, self._moves = (0, 0), 0
+        await self._move_to(self._dx(x), self._dy(y), rehome=False)
 
     async def reset(self):
         self._pos = None
@@ -562,6 +587,8 @@ class Phone:
         missed = 0
         for uy in ys:
             for ux in xs:
+                await self.link.cmd(HOME_CMD)  # each stop is one move from the corner, exactly like a tap
+                self._pos = (0, 0)
                 await self._move_to(ux, uy, rehome=False)
                 found = await self.link.find_pointer(near_right_edge=ux == xs[-1])
                 if found is None:

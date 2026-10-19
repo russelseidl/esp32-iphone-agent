@@ -44,6 +44,13 @@ def test_locate_handles_a_left_nudge():
     assert abs(ox - 200 / 240) < 0.02 and abs(nx - 176 / 240) < 0.02
 
 
+def test_locate_ignores_a_small_distractor_like_a_clock_hand():
+    a = frame(pointer=(100, 200), extra=(180, 400, 184, 406))
+    b = frame(pointer=(124, 200), extra=(186, 400, 190, 406))  # the hand moved too
+    (ox, oy), (nx, ny) = locate(a, b, nudge_sign=+1)
+    assert abs(ox - 100 / 240) < 0.02 and abs(nx - 124 / 240) < 0.02
+
+
 def test_locate_rejects_a_screen_that_changed_elsewhere():
     a = frame(pointer=(100, 200))
     b = frame(pointer=(124, 200), extra=(0, 400, 240, 520))  # a big UI change
