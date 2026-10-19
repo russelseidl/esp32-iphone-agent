@@ -422,10 +422,10 @@ async def _settled_frame(self: Link) -> Frame:
     return prev
 
 
-async def _fresh_frame(self: Link, after_board_ms: int) -> Frame | None:
+async def _fresh_frame(self: Link, after_board_ms: int, wait_s: float = FRESH_S) -> Frame | None:
     """The first frame the phone captured after board time `after_board_ms` (plus the phone's own encode
-    latency), or None within FRESH_S. Decode time is useless here: the mirror runs ~0.5 s behind."""
-    deadline = time.monotonic() + FRESH_S
+    latency), or None within wait_s. Decode time is useless here: the mirror runs ~0.5 s behind."""
+    deadline = time.monotonic() + wait_s
     while time.monotonic() < deadline:
         await asyncio.sleep(0.1)
         if self.decoder.frame_ts >= after_board_ms + 150:
@@ -460,39 +460,48 @@ async def _find_pointer(self: Link, near_right_edge: bool = False) -> tuple[floa
     return found[1] if found else None
 
 
-async def _frame_changed(self: Link, before: Frame, wait_s: float = 8.0, min_change: float = 0.25) -> bool | None:
-    """Did at least min_change of the screen change relative to `before` within wait_s? Compares only live
-    frames; None when no live frame arrived in time (the mirror was replaying), i.e. unverified."""
+async def _frame_changed(self: Link, before: Frame, after_board_ms: int, wait_s: float = 8.0,
+                         min_change: float = 0.25) -> bool | None:
+    """Did at least min_change of the screen change relative to `before`, in a frame the phone captured after
+    board time `after_board_ms`? A screen change bursts frames the link needs seconds to drain, so frames are
+    chosen by board timestamp, not by link liveness. None when no such frame arrived within wait_s."""
     deadline = time.monotonic() + wait_s
-    seen_live = False
+    seen = False
     while time.monotonic() < deadline:
         await asyncio.sleep(0.3)
-        png, lag = await self.frame(timeout=1.5)
-        if not lag["live"]:
+        if self.decoder.png is None or self.decoder.frame_ts < after_board_ms + 300:
             continue
-        seen_live = True
-        if changed_fraction(before, Frame.from_jpeg(png)) >= min_change:
+        seen = True
+        if changed_fraction(before, Frame.from_jpeg(self.decoder.png)) >= min_change:
             return True
-    return False if seen_live else None
+    return False if seen else None
 
 
-async def _keyboard_up(self: Link, wait_s: float = 6.0) -> bool:
-    """Is the on-screen keyboard showing in a live frame within wait_s? A screen change bursts frames and the
-    BLE link needs a few seconds to catch up, so stale frames are skipped rather than trusted."""
+async def _keyboard_is(self: Link, up: bool, wait_s: float = 8.0, after_board_ms: int | None = None) -> bool:
+    """Is the on-screen keyboard showing (`up`) or gone (not `up`) in a frame the phone captured after
+    `after_board_ms` (default: now)? Frames are chosen by board timestamp because the link may still be
+    draining a burst, which can take longer than the wait: False then means "not seen", not "not there"."""
+    if after_board_ms is None:
+        after_board_ms = self.board_now() - 1500  # the keyboard may already be up: accept recent frames
     deadline = time.monotonic() + wait_s
     while True:
-        png, lag = await self.frame(timeout=1.5)
-        if lag["live"] and keyboard_visible(Frame.from_jpeg(png)):
-            return True
+        if self.decoder.png is not None and self.decoder.frame_ts >= after_board_ms + 300:
+            if keyboard_visible(Frame.from_jpeg(self.decoder.png)) == up:
+                return True
         if time.monotonic() >= deadline:
             return False
         await asyncio.sleep(0.3)
+
+
+async def _keyboard_up(self: Link, wait_s: float = 8.0, after_board_ms: int | None = None) -> bool:
+    return await self.keyboard_is(True, wait_s, after_board_ms)
 
 
 Link._settled_frame = _settled_frame
 Link._fresh_frame = _fresh_frame
 Link.find_pointer = _find_pointer
 Link.frame_changed = _frame_changed
+Link.keyboard_is = _keyboard_is
 Link.keyboard_up = _keyboard_up
 
 
@@ -916,7 +925,7 @@ async def type_text(text: str, fix_caps: bool = True) -> str:
     hardware keyboard; with fix_caps the first character is retyped afterwards so the text is sent exactly."""
     if not text.isascii():
         raise RuntimeError("the board types ASCII only")
-    if not await link.keyboard_up(6.0):
+    if not await link.keyboard_up(6.0):  # recent frames: the field was tapped before this call
         TELEMETRY.event("nav", action="type_text", ok=False, why="no keyboard")
         return "no effect: no keyboard is showing; tap a text field first, then type"
     await link.cmd(f"type {text}")
@@ -954,8 +963,9 @@ async def home() -> str:
 async def back() -> str:
     """iOS back gesture: a flick from the left screen edge. Reports whether the screen changed."""
     before = Frame.from_jpeg((await link.frame(timeout=2))[0])
+    t_board = link.board_now()
     await phone.edge_back()
-    ok = await link.frame_changed(before)
+    ok = await link.frame_changed(before, t_board)
     TELEMETRY.event("nav", action="back", ok=ok)
     if ok is None:
         return "back sent, unverified (the mirror was replaying); take a screenshot"
@@ -966,8 +976,9 @@ async def back() -> str:
 async def app_switcher() -> str:
     """Open the App Switcher (drag up from the bottom edge and hold)."""
     before = Frame.from_jpeg((await link.frame(timeout=2))[0])
+    t_board = link.board_now()
     await phone.app_switcher()
-    ok = await link.frame_changed(before)
+    ok = await link.frame_changed(before, t_board)
     TELEMETRY.event("nav", action="app_switcher", ok=ok)
     if ok is None:
         return "app switcher sent, unverified (the mirror was replaying); take a screenshot"
@@ -978,31 +989,45 @@ async def app_switcher() -> str:
 async def open_app(name: str) -> str:
     """Open an app by name: Home, then Search (Cmd+Space), type the name, Enter. Verifies that the screen
     changed from the Home Screen. Use this instead of hunting for icons."""
+    t_home = link.board_now()
     await phone.edge_home()
-    await asyncio.sleep(0.8)
-    home_frame = await link._settled_frame()
+    # the reference must be a frame captured after the flick: the link can still be draining the previous
+    # app's closing animation for 10+ s, and a key sent into that animation was seen to be swallowed
+    home_frame = await link._fresh_frame(t_home + 1200, wait_s=15.0) or await link._settled_frame()
+    t_board = link.board_now()
     await link.cmd("key cmd+space")
-    opened = await link.keyboard_up(3.0)
-    if not opened:  # system shortcuts were seen to stop being honoured mid-session: tap the Search pill instead
-        NOTES.learn("home", "cmd+space", False)
-        await phone.tap(500, 822, precise=True)
-        opened = await link.keyboard_up(6.0)
+    # measured: the keyboard shows ~3.5 s after the key, but the burst from the previous app closing can hold
+    # the link back for longer, so the wait is generous and the fallback only fires when the screen still
+    # looks like the Home Screen (a tap on an already-open Search lands on a keyboard key)
+    opened = await link.keyboard_up(8.0, t_board)
+    via_pill = False
+    if not opened and await link.frame_changed(home_frame, t_board, wait_s=3) is False:
+        via_pill = True  # the shortcut was seen to stop being honoured mid-session
+        t_board = link.board_now()
+        await phone.tap(500, 822, precise=True)  # the Search pill
+        opened = await link.keyboard_up(8.0, t_board)
         if opened:
             TELEMETRY.event("nav", action="open_app", name=name, via="search pill")
-    else:
-        NOTES.learn("home", "cmd+space", True)
+    elif not opened:
+        opened = await link.keyboard_up(5.0, t_board)  # the screen did change: still draining
+    if opened:
+        NOTES.learn("home", "cmd+space", not via_pill)
     if not opened:
         TELEMETRY.event("nav", action="open_app", name=name, ok=False, why="search did not open")
         return "no effect: Search did not open from the Home Screen (is the phone unlocked on the Home Screen?)"
     await link.cmd(f"type {name}")
     await asyncio.sleep(1.2)  # Search ranks the top hit
+    t_board = link.board_now()
     await link.cmd("key enter")
     await asyncio.sleep(1.0)
-    ok = await link.frame_changed(home_frame, wait_s=3)
-    TELEMETRY.event("nav", action="open_app", name=name, ok=ok)
+    ok = await link.frame_changed(home_frame, t_board, wait_s=8)
+    dismissed = ok and await link.keyboard_is(False, 5.0, t_board)  # Search still up = nothing was opened
+    TELEMETRY.event("nav", action="open_app", name=name, ok=bool(ok and dismissed), search_left_open=bool(ok and not dismissed))
     phone._pos = None
     if ok is None:
         return f"'{name}' sent to Search, unverified (the mirror was replaying); take a screenshot"
+    if ok and not dismissed:
+        return f"no effect: Search found nothing to open for '{name}' and is still showing (home() closes it)"
     return _ok(f"opened {name} (verify with a screenshot that it is the right app)") if ok else \
         f"no effect: nothing opened for '{name}' (no such app, or Search picked nothing)"
 
@@ -1015,9 +1040,10 @@ async def search_in_app(text: str, app: str = "") -> str:
     for combo in ("cmd+k", "cmd+f"):
         if app and NOTES.shortcut(app, combo) is False:
             continue
+        t_board = link.board_now()
         await link.cmd(f"key {combo}")
         tried.append(combo)
-        if await link.keyboard_up(4.0):
+        if await link.keyboard_up(5.0, t_board):
             if app:
                 NOTES.learn(app, combo, True)
             await link.cmd(f"type {text}")
