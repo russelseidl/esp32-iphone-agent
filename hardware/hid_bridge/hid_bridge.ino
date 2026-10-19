@@ -151,6 +151,13 @@ const char *usbState() {
   return tud_suspended() ? "asleep" : "ok";
 }
 
+static void onUsbEvent(void *, esp_event_base_t base, int32_t id, void *) {
+  if (base != ARDUINO_USB_EVENTS) return;
+  const char *what = id == ARDUINO_USB_STARTED_EVENT ? "mounted" : id == ARDUINO_USB_STOPPED_EVENT ? "unmounted"
+                   : id == ARDUINO_USB_SUSPEND_EVENT ? "suspended" : id == ARDUINO_USB_RESUME_EVENT ? "resumed" : "event";
+  boardLog("usb: %s", what);
+}
+
 // Board-level commands from the app; everything else is an HID command for run().
 String board(const String &line, const String &id) {
   int sp = line.indexOf(' ');
@@ -192,6 +199,14 @@ String board(const String &line, const String &id) {
   if (cmd == "unpair") {
     ble_reply(id + " ok");  // answer before the link goes down
     ble_unpair();
+    return "";
+  }
+  if (cmd == "usbreset") {  // re-enumerate on the phone, like a re-plug (clears a stuck button on iOS)
+    ble_reply(id + " ok");
+    boardLog("usb: reset requested");
+    tud_disconnect();
+    delay(500);
+    tud_connect();
     return "";
   }
   if (cmd == "pace") {  // move pacing: STEP units per report, STEP_MS between reports (not stored)
@@ -258,6 +273,7 @@ void setup() {
   keyboard.begin();
   consumer.begin();
   USB.productName("HID Bridge");
+  USB.onEvent(onUsbEvent);
   USB.begin();
   esp_task_wdt_config_t wdt = {.timeout_ms = WATCHDOG_MS, .idle_core_mask = 0, .trigger_panic = true};
   esp_task_wdt_reconfigure(&wdt);
