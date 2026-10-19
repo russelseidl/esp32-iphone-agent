@@ -33,6 +33,7 @@ from bleak import BleakClient, BleakScanner
 from mcp.server.mcpserver import MCPServer, Image
 
 from apps import AppNotes
+from bench import Trial, find_dots, match_dots, pick_winners, summarize, to_markdown
 from calibration import Calibration
 from pointer import Frame, changed_fraction, locate
 from screen import keyboard_visible
@@ -1024,6 +1025,72 @@ async def pace(step: int = 10, step_ms: int = 8) -> str:
     reply = await link.cmd(f"pace {step} {step_ms}")
     phone._pos = None
     return f"{reply}: pace {step} units / {step_ms} ms (recalibrate before precise work)"
+
+
+BENCH_AXES = {
+    "res":  ["480 1040", "360 780", "718 1560"],
+    "fps":  ["5", "3", "8"],
+    "coex": ["balance", "bt", "wifi"],
+    "pace": ["10 8", "5 8", "10 4", "20 8"],
+    "aim":  ["plain", "precise"],
+}
+BENCH_PLAN = [(300, 250), (700, 250), (500, 500), (300, 750), (700, 750)]  # five taps per setting
+
+
+async def _apply_setting(axis: str, value: str) -> None:
+    if axis in ("res", "fps", "coex", "pace"):
+        await link.cmd(f"{axis} {value}")
+    if axis in ("res", "pace"):
+        await phone.calibrate_auto()  # the pointer map depends on both
+
+
+@mcp.tool()
+async def bench(axes: list[str] = ["aim", "pace", "coex"], taps_per_setting: int = 5) -> str:
+    """A/B bench: with a blank Freeform board open and its pen selected, taps a planned grid per setting,
+    reads the dots back, and ranks settings by tap error then latency. Axes: aim, pace, coex (live) and res,
+    fps (need a mirroring restart per setting). Writes ~/.esp32-agent/bench/<date>.md and trial telemetry.
+    Restores the baseline at the end and presses Home."""
+    png, lag = await link.frame()
+    if not lag["live"] or find_dots(Frame.from_jpeg(png)) is None:
+        return "refused: open a blank Freeform board (white canvas) with the pen tool selected, mirroring live"
+    unknown = [a for a in axes if a not in BENCH_AXES]
+    if unknown:
+        return f"refused: unknown axes {unknown}; choose from {list(BENCH_AXES)}"
+    trials: list[Trial] = []
+    try:
+        for axis in axes:
+            for value in BENCH_AXES[axis]:
+                await _apply_setting(axis, value)
+                before = Frame.from_jpeg((await link.frame())[0])
+                drops0 = int(link.status.get("ble", {}).get("drop", 0))
+                lat = []
+                for (x, y) in BENCH_PLAN[:taps_per_setting]:
+                    t0 = time.monotonic()
+                    await phone.tap(x, y, precise=(value == "precise") if axis == "aim" else False)
+                    await link._fresh_frame(link.board_now())
+                    lat.append((time.monotonic() - t0) * 1000)
+                after = Frame.from_jpeg((await link.frame())[0])
+                found = find_dots(after) or []
+                known = find_dots(before) or []
+                new = [d for d in found if all(abs(d[0] - k[0]) + abs(d[1] - k[1]) > 20 for k in known)]
+                errors = match_dots(BENCH_PLAN[:taps_per_setting], new)
+                drops = int(link.status.get("ble", {}).get("drop", 0)) - drops0
+                for e, l in zip(errors, lat):
+                    tr = Trial(axis, value, e, round(l), drops)
+                    trials.append(tr)
+                    TELEMETRY.event(**tr.row())
+                for _ in range(taps_per_setting):
+                    await link.cmd("key cmd+z")  # Freeform: undo one dot per tap
+            await _apply_setting(axis, BENCH_AXES[axis][0])  # baseline back for this axis
+    finally:
+        await phone.edge_home()
+    summary = summarize(trials)
+    winners = pick_winners(summary)
+    out = HOME / "bench"
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / (time.strftime("%Y-%m-%d-%H%M") + ".md")
+    path.write_text(f"# Bench {time.strftime('%Y-%m-%d %H:%M')}\n\n" + to_markdown(summary, winners))
+    return json.dumps({"summary": summary, "winners": winners, "file": str(path)}, default=str)
 
 
 @mcp.tool()
