@@ -244,6 +244,11 @@ void statusTask(void *) {
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(1000));
     if (!ble_connected()) continue;
+    static uint32_t idleSince;  // station on the hotspot but no mirroring session
+    bool stalled = net_peers() > 0 && airplay_state() == AIRPLAY_IDLE;
+    if (!stalled) idleSince = 0;
+    else if (!idleSince) idleSince = millis();
+    else if (millis() - idleSince > 30000) { boardLog("airplay: no session for 30 s with a station present"); idleSince = millis(); }
     String s = statusJson(true);
     if (s.length() > ble_mtu() - 3u) s = statusJson(false);
     ble_status(s);
