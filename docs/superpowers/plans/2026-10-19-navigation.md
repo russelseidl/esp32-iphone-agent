@@ -472,3 +472,22 @@ Spec coverage (section 3): composite tools with verification (Task 3; app-title 
 
 Pending: the phone was away when Tasks 1-3 and 5 were completed (2026-10-19 ~14:10). Run Task 4 when it is
 back; the tools are installed and the agent is running.
+
+### Field notes, 2026-10-19 14:15-14:50 (phone back)
+
+- `app_switcher`: 1 of 1 opened the switcher. `back`: works as a gesture (from the Home Screen it swipes to
+  the Today view; in a page with no history it correctly reports "no effect").
+- `open_app clock`: opened Clock (reported "unverified" while the mirror was still draining the frame burst a
+  screen change causes; waits were lengthened to 8 s since).
+- Keyboard detector: the first two versions failed on real frames (letter glyphs inside keys); the key-pitch
+  periodicity + flat gap row version is validated on real Spotlight frames (3 of 3 true, Home Screen false).
+- `search_in_app` in Slack: Cmd+K and Cmd+F do nothing in Slack; the notes now record that and the tool
+  reports "no effect" honestly.
+- `type_text` caps repair: the first version raced its arrow keys (doubled first letter); now selection-based
+  with 0.2 s gaps; not yet re-verified.
+- System shortcuts (Cmd+Space, Cmd+H) stopped being honoured by iOS at about 14:26 after working for hours;
+  plain typing and app-level combos (Shift+A, Cmd+A, Ctrl+A) still worked; a USB re-enumeration did not
+  restore them. `open_app` therefore falls back to tapping the Search pill.
+- Vertical pointer travel changed in the same period (495 units reached 0.646 instead of 0.792; taps aimed at
+  y=822 landed at the bottom edge). A phone restart is the next test; if it clears both, the Mac should
+  recalibrate and re-probe system shortcuts whenever the stuck detector fires.
