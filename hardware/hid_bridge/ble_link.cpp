@@ -8,6 +8,7 @@
 // reply or an ATT write response never queues behind more than ~2 KB of video. It also leaves MBUF_RESERVE host
 // blocks free, and never sends while a reply or status is waiting.
 #include "ble_link.h"
+#include "boardlog.h"
 #include <atomic>
 #include <NimBLEDevice.h>
 #include "nimble/nimble/host/include/host/ble_hs.h"
@@ -22,7 +23,7 @@ static_assert(MYNEWT_VAL(BLE_L2CAP_COC_MAX_NUM) == 1 && MYNEWT_VAL(BLE_L2CAP_COC
 #define UUID(s) "6e400001-a9e8-4b1b-9c39-6d6f8a3c" s
 const size_t CMD_MAX = 512;
 const size_t TEXT_MAX = 514;               // MTU 517 - 3
-const uint32_t VIDEO_TIMEOUT_MS = 1500;    // a full buffer waits; only a stalled link drops the chunk
+const uint32_t VIDEO_TIMEOUT_MS = 4000;    // a stalled link pauses the stream; 1.5 s forced a full replay on every hiccup
 const uint32_t REPLY_TIMEOUT_MS = 3000;    // replies retry this long (video is paused meanwhile)
 const uint32_t STATUS_TIMEOUT_MS = 500;    // a newer status replaces it a second later anyway
 const int MBUF_RESERVE = 16;               // of 64 msys blocks; video never takes these
@@ -121,6 +122,7 @@ class ServerCb : public NimBLEServerCallbacks {
       peers[i] = -1;
     }
     BLE_LOG("disconnect conn %u, reason 0x%x\n", ci.getConnHandle(), reason);
+    boardLog("ble: disconnect reason 0x%x", reason);
     NimBLEDevice::startAdvertising();
   }
   void onMTUChange(uint16_t mtu, NimBLEConnInfo &ci) override { BLE_LOG("conn %u: mtu %u\n", ci.getConnHandle(), mtu); }
@@ -328,6 +330,7 @@ size_t ble_video_room() { return anySubscribed(CH_VIDEO) ? ble_mtu() - 3 - 3 : 0
 bool ble_video_send(const uint8_t *p, size_t n) {
   if (!notifyRaw(CH_VIDEO, p, n, VIDEO_TIMEOUT_MS)) {
     drops++;
+    boardLog("ble: video notify dropped (%lu total)", (unsigned long)drops);
     return false;
   }
   uint32_t now = millis();

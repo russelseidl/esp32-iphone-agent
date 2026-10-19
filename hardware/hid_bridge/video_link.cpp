@@ -2,6 +2,7 @@
 #include "video_link.h"
 #include <esp_heap_caps.h>
 #include "ble_link.h"
+#include "boardlog.h"
 #include "src/video/gop.h"
 
 // GOP since the latest IDR; overflow drops it until the next IDR. A still screen gets an IDR only every
@@ -195,9 +196,16 @@ void video_on_au(const uint8_t *au, size_t len, bool idr) {
     winBytes = winFrames = 0;
     winStart = now;
   }
+  static uint32_t seenOverflows, seenCont;
   xSemaphoreTake(lock, portMAX_DELAY);
   gop_push(&gop, au, len, idr, now);
+  bool overflowed = gop.overflows != seenOverflows, continued = gop.continuations != seenCont;
+  seenOverflows = gop.overflows;
+  seenCont = gop.continuations;
+  int kept = gop.n;
   xSemaphoreGive(lock);
+  if (overflowed) boardLog("gop: overflow, dropped until the next IDR");
+  if (continued) boardLog("gop: compacted, continuing for the streaming client (%d AUs kept)", kept);
   xTaskNotifyGive(task);
 }
 
