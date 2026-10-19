@@ -136,6 +136,23 @@ static void test_gop(void) {
   CHECK(!avcc_to_annexb(bad, sizeof bad));
 }
 
+static void test_gop_full_table_all_sent(void) {
+  // the AU table fills (not the arena) while the streaming client has everything: the compaction must drop
+  // all of it (it read aus[n], one past the table, and the board crashed in the field at 8192 AUs)
+  static uint8_t arena[1000];
+  static gop_au aus[4];
+  gop_buf g;
+  gop_init(&g, arena, sizeof arena, aus, 4);
+  uint8_t au[10] = {0, 0, 0, 1, 0x41};
+  CHECK(gop_push(&g, au, 10, true, 1) == 0);
+  for (int i = 1; i < 4; i++) CHECK(gop_push(&g, au, 10, false, i + 1) == i);
+  uint32_t gen = g.gen;
+  gop_mark_sent(&g, gen, 3);  // client has all 4
+  CHECK(gop_push(&g, au, 10, false, 9) == 0);  // compacted to nothing, then appended
+  CHECK(g.gen == gen + 1 && g.cont && g.n == 1 && g.used == 10 && g.aus[0].off == 0 && g.aus[0].ts == 9);
+  CHECK(g.continuations == 1 && g.overflows == 0);
+}
+
 static void test_gop_resume(void) {
   static uint8_t arena[100];
   static gop_au aus[4];
@@ -225,6 +242,7 @@ int main(void) {
   test_bplist_roundtrip();
   test_bplist_utf16();
   test_gop();
+  test_gop_full_table_all_sent();
   test_gop_resume();
   test_chunker();
   test_hidretry();

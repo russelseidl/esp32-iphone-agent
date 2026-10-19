@@ -66,6 +66,10 @@ REHOME_EVERY = 10       # gestures between re-homing (cancels drift of the relat
 # top of the arc, 15% in from the left edge, so nothing left of that was reachable with positive units; the
 # x-dominant push parks it on the left edge just below the arc (measured 4 of 4 at (3, 108) px). ~1 s paced.
 HOME_CMD = "move -1200 -600"
+# bench 2026-10-19 (three runs, 5 taps per setting): 10/4 is ~30% faster per step than the firmware default
+# 10/8 (1.85 s vs 2.6 s) with the same error band (15-22 vs 13-19 units) and no drops; 20/8 is as fast but
+# misses more (29-37 units); 5/8 is slower and no more accurate. Sent at connect and after every flick.
+DEFAULT_PACE = "10 4"
 HOLD = 0.25             # rest before lifting a swipe, so iOS adds no momentum
 TAP_GAP = 0.15          # stay still after a click, so iOS sees a tap and not the start of a drag
 
@@ -243,6 +247,7 @@ class Link:
             log.info("connected to %s (%s), mtu %s", dev.name, dev.address, client.mtu_size)
             TELEMETRY.event("link", state="connected", name=dev.name, mtu=client.mtu_size)
             await self._stream_on(resume_ts)  # keep the mirror flowing into the decoder for as long as we are linked
+            await self._cmd(f"pace {DEFAULT_PACE}")  # the board boots at 10/8; see DEFAULT_PACE
             if KEEP_AWAKE_S and (self._keeper is None or self._keeper.done()):
                 self._keeper = asyncio.create_task(self._keep_awake())
 
@@ -669,7 +674,7 @@ class Phone:
             await self.link.cmd("move 0 -300")
         finally:
             await self.link.cmd("release")
-            await self.link.cmd("pace 10 8")
+            await self.link.cmd(f"pace {DEFAULT_PACE}")
         await asyncio.sleep(0.6)
         await self.reset()
 
@@ -683,7 +688,7 @@ class Phone:
             await self.link.cmd("move 300 0")
         finally:
             await self.link.cmd("release")
-            await self.link.cmd("pace 10 8")
+            await self.link.cmd(f"pace {DEFAULT_PACE}")
         self._pos = None
 
     async def app_switcher(self):
@@ -745,7 +750,10 @@ class Phone:
             out.append(max(u, (out[-1] + least) if out else least))
         return out
 
-    async def tap(self, x, y, precise: bool = False):
+    async def tap(self, x, y, precise: bool = False, dab: bool = False):
+        """dab: instead of a click, press and stroke the pointer 8 units out and back so a drawing tool leaves
+        a mark centred on the aim (a plain click in Freeform's pen draws nothing visible, and a 2-unit wiggle
+        is mostly swallowed by iOS pointer acceleration; measured 2026-10-19)."""
         await self.point(x, y)
         if precise:
             found = await self.link.find_pointer(near_right_edge=x > 900)
@@ -764,7 +772,15 @@ class Phone:
                     dy = self._dy(y) - self._dy(fy)
                     await self.link.cmd(f"move {dx} {dy}")
                     self._pos = (self._pos[0] + dx, self._pos[1] + dy)
-        await self.link.cmd("click")
+        if dab:
+            await self.link.cmd("press")
+            try:
+                await self.link.cmd("move 8 8")
+                await self.link.cmd("move -8 -8")
+            finally:
+                await self.link.cmd("release")
+        else:
+            await self.link.cmd("click")
         await asyncio.sleep(TAP_GAP)
 
     async def long_press(self, x, y, seconds: float):
@@ -1180,7 +1196,7 @@ async def bench(axes: list[str] = ["aim", "pace", "coex"], taps_per_setting: int
                 lat = []
                 for (x, y) in BENCH_PLAN[:taps_per_setting]:
                     t0 = time.monotonic()
-                    await phone.tap(x, y, precise=(value == "precise") if axis == "aim" else False)
+                    await phone.tap(x, y, precise=(value == "precise") if axis == "aim" else False, dab=True)
                     await link._fresh_frame(link.board_now())
                     lat.append((time.monotonic() - t0) * 1000)
                 after = Frame.from_jpeg((await link.frame())[0])

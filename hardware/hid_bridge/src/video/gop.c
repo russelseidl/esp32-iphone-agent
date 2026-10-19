@@ -29,8 +29,8 @@ static void restart(gop_buf *g) {
 // Drops the AUs the streaming client already has and moves the rest to the front of the arena.
 static void compact(gop_buf *g) {
   int k = g->keep_from, left = g->n - k;
-  size_t base = g->aus[k].off;
-  memmove(g->arena, g->arena + base, g->used - base);
+  size_t base = left > 0 ? g->aus[k].off : g->used;  // k == n (client has everything): drop it all
+  if (left > 0) memmove(g->arena, g->arena + base, g->used - base);
   for (int i = 0; i < left; i++) {
     g->aus[i] = g->aus[k + i];
     g->aus[i].off -= base;
