@@ -32,8 +32,10 @@ from pathlib import Path
 from bleak import BleakClient, BleakScanner
 from mcp.server.mcpserver import MCPServer, Image
 
+from apps import AppNotes
 from calibration import Calibration
 from pointer import Frame, changed_fraction, locate
+from screen import keyboard_visible
 from telemetry import Telemetry
 from watchdog import StuckDetector, backoff
 
@@ -49,6 +51,7 @@ FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 HOME = Path(os.environ.get("ESP32_AGENT_HOME", "~/.esp32-agent")).expanduser()
 CAL_FILE = HOME / "calibration.json"
 TELEMETRY = Telemetry(HOME / "telemetry.jsonl")
+NOTES = AppNotes(HOME / "apps.json")
 SCAN_TIMEOUT = float(os.environ.get("ESP32_AGENT_SCAN", "15"))
 KEEP_AWAKE_S = float(os.environ.get("ESP32_AGENT_KEEPAWAKE", "20"))  # idle seconds between pointer nudges; 0 = off
 
@@ -456,9 +459,33 @@ async def _find_pointer(self: Link, near_right_edge: bool = False) -> tuple[floa
     return found[1] if found else None
 
 
+async def _frame_changed(self: Link, before: Frame, wait_s: float = 2.5, min_change: float = 0.25) -> bool:
+    """Did at least min_change of the screen change relative to `before` within wait_s? Polls fresh frames."""
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.3)
+        png, lag = await self.frame(timeout=1.5)
+        if changed_fraction(before, Frame.from_jpeg(png)) >= min_change:
+            return True
+    return False
+
+
+async def _keyboard_up(self: Link, wait_s: float = 2.0) -> bool:
+    deadline = time.monotonic() + wait_s
+    while True:
+        png, _ = await self.frame(timeout=1.5)
+        if keyboard_visible(Frame.from_jpeg(png)):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.3)
+
+
 Link._settled_frame = _settled_frame
 Link._fresh_frame = _fresh_frame
 Link.find_pointer = _find_pointer
+Link.frame_changed = _frame_changed
+Link.keyboard_up = _keyboard_up
 
 
 def shot(png: bytes, lag: dict):
@@ -575,6 +602,31 @@ class Phone:
             await self.link.cmd("pace 10 8")
         await asyncio.sleep(0.6)
         await self.reset()
+
+    async def edge_back(self):
+        """iOS back: a flick from the pinned left edge rightwards."""
+        await self.link.cmd("release")
+        await self.link.cmd("move -1500 0")
+        await self.link.cmd("pace 25 4")
+        await self.link.cmd("press")
+        try:
+            await self.link.cmd("move 300 0")
+        finally:
+            await self.link.cmd("release")
+            await self.link.cmd("pace 10 8")
+        self._pos = None
+
+    async def app_switcher(self):
+        """Drag up from the bottom edge and hold before releasing: the App Switcher."""
+        await self.link.cmd("release")
+        await self.link.cmd("move 0 1500")
+        await self.link.cmd("press")
+        try:
+            await self.link.cmd("move 0 -300")
+            await asyncio.sleep(0.5)
+        finally:
+            await self.link.cmd("release")
+        self._pos = None
 
     GRID = (0.15, 0.5, 0.85)  # screen fractions the grid aims at (from the current map, or a default span)
 
@@ -739,7 +791,11 @@ async def screenshot():
                     age_s=lag["newest_frame_age_s"], pending=lag["pending_decodes"])
     if not lag["live"]:
         TELEMETRY.count("stale_screenshots")
-    return shot(png, lag)
+    fr = Frame.from_jpeg(png)
+    state = (f"state: {'live' if lag['live'] else 'replaying' if lag['mirroring'] else 'not mirroring'}, "
+             f"keyboard {'up' if keyboard_visible(fr) else 'down'}, frame age {lag['newest_frame_age_s']} s")
+    result = shot(png, lag)
+    return result + [state] if isinstance(result, list) else [result, state]
 
 
 CAL_FIRST = (60, 100)  # mouse units of the first calibration stop, from the homed top-left corner
@@ -846,11 +902,23 @@ async def scroll(x: int, y: int, lines: int) -> str:
 
 
 @mcp.tool()
-async def type_text(text: str) -> str:
-    """Type ASCII text with the USB keyboard. Tap a text field first (the keyboard must be showing)."""
+async def type_text(text: str, fix_caps: bool = True) -> str:
+    """Type ASCII text with the USB keyboard into the focused field. Waits up to 2 s for the on-screen
+    keyboard to be showing (tap the field first). iOS capitalises the first letter it receives from a
+    hardware keyboard; with fix_caps the first character is retyped afterwards so the text is sent exactly."""
     if not text.isascii():
         raise RuntimeError("the board types ASCII only")
+    if not await link.keyboard_up(2.0):
+        TELEMETRY.event("nav", action="type_text", ok=False, why="no keyboard")
+        return "no effect: no keyboard is showing; tap a text field first, then type"
     await link.cmd(f"type {text}")
+    if fix_caps and text[:1].islower():
+        await link.cmd("key cmd+left")
+        await link.cmd("key right")
+        await link.cmd("key backspace")
+        await link.cmd(f"type {text[0]}")
+        await link.cmd("key cmd+right")
+    TELEMETRY.event("nav", action="type_text", chars=len(text), ok=True)
     return _ok(f"typed {len(text)} chars")
 
 
@@ -872,9 +940,66 @@ async def home() -> str:
 
 @mcp.tool()
 async def back() -> str:
-    """iOS back gesture: a flick from the left screen edge."""
-    await phone.swipe(5, 450, 600, 450, hold=False)
-    return _ok("back")
+    """iOS back gesture: a flick from the left screen edge. Reports whether the screen changed."""
+    before = Frame.from_jpeg((await link.frame(timeout=2))[0])
+    await phone.edge_back()
+    ok = await link.frame_changed(before)
+    TELEMETRY.event("nav", action="back", ok=ok)
+    return _ok("back") if ok else "no effect: the screen did not change (not every screen has a back gesture)"
+
+
+@mcp.tool()
+async def app_switcher() -> str:
+    """Open the App Switcher (drag up from the bottom edge and hold)."""
+    before = Frame.from_jpeg((await link.frame(timeout=2))[0])
+    await phone.app_switcher()
+    ok = await link.frame_changed(before)
+    TELEMETRY.event("nav", action="app_switcher", ok=ok)
+    return _ok("app switcher") if ok else "no effect: the screen did not change"
+
+
+@mcp.tool()
+async def open_app(name: str) -> str:
+    """Open an app by name: Home, then Search (Cmd+Space), type the name, Enter. Verifies that the screen
+    changed from the Home Screen. Use this instead of hunting for icons."""
+    await phone.edge_home()
+    await asyncio.sleep(0.8)
+    home_frame = Frame.from_jpeg((await link.frame(timeout=2))[0])
+    await link.cmd("key cmd+space")
+    if not await link.keyboard_up(2.5):
+        TELEMETRY.event("nav", action="open_app", name=name, ok=False, why="search did not open")
+        return "no effect: Search did not open from the Home Screen (is the phone unlocked on the Home Screen?)"
+    await link.cmd(f"type {name}")
+    await asyncio.sleep(1.2)  # Search ranks the top hit
+    await link.cmd("key enter")
+    await asyncio.sleep(1.0)
+    ok = await link.frame_changed(home_frame, wait_s=3)
+    TELEMETRY.event("nav", action="open_app", name=name, ok=ok)
+    phone._pos = None
+    return _ok(f"opened {name} (verify with a screenshot that it is the right app)") if ok else \
+        f"no effect: nothing opened for '{name}' (no such app, or Search picked nothing)"
+
+
+@mcp.tool()
+async def search_in_app(text: str, app: str = "") -> str:
+    """Open the current app's search and type `text`: Cmd+K (then Cmd+F) when the app honours it, per the
+    notes in ~/.esp32-agent/apps.json; records what worked. Say which app is open in `app` when you know."""
+    tried = []
+    for combo in ("cmd+k", "cmd+f"):
+        if app and NOTES.shortcut(app, combo) is False:
+            continue
+        await link.cmd(f"key {combo}")
+        tried.append(combo)
+        if await link.keyboard_up(2.0):
+            if app:
+                NOTES.learn(app, combo, True)
+            await link.cmd(f"type {text}")
+            TELEMETRY.event("nav", action="search_in_app", app=app, combo=combo, ok=True)
+            return _ok(f"search opened with {combo}; typed {len(text)} chars")
+        if app:
+            NOTES.learn(app, combo, False)
+    TELEMETRY.event("nav", action="search_in_app", app=app, tried=tried, ok=False)
+    return f"no effect: {', '.join(tried) or 'no shortcut'} did not open a search field; tap the app's search control instead"
 
 
 @mcp.tool()
