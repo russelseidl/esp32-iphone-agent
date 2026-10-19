@@ -61,7 +61,11 @@ REHOME_EVERY = 10       # gestures between re-homing (cancels drift of the relat
 # Re-homing: a paced move far past the top-left corner (iOS clamps the pointer there). The board's `home`
 # command fires 50 unpaced (-127,-127) reports 2 ms apart, and iOS 26 was seen dropping most of them (with
 # the on-screen keyboard up), which left every following tap starting from the wrong place.
-HOME_CMD = "move -600 -1200"  # the screen is ~270 x 620 units from the corner; this is ~1 s of paced travel
+# The pointer cannot enter the display's rounded corner (radius ~110 px of 718): pushed into the corner it
+# rests on that arc where the push direction is normal to it. A steep diagonal (-600 -1200) parked it at the
+# top of the arc, 15% in from the left edge, so nothing left of that was reachable with positive units; the
+# x-dominant push parks it on the left edge just below the arc (measured 4 of 4 at (3, 108) px). ~1 s paced.
+HOME_CMD = "move -1200 -600"
 HOLD = 0.25             # rest before lifting a swipe, so iOS adds no momentum
 TAP_GAP = 0.15          # stay still after a click, so iOS sees a tap and not the start of a drag
 
@@ -704,8 +708,10 @@ class Phone:
         home = await self.link.find_pointer()
         if home is None:
             raise RuntimeError("pointer not found after homing: is AssistiveTouch on and the screen still?")
-        xs = [guess.units("x", f) for f in self.GRID]
-        ys = [guess.units("y", f) for f in self.GRID]
+        # the guess only picks where to probe; the probes must be distinct positive moves (the old map can
+        # say 0 units for a fraction left of its own origin, which would duplicate the home point)
+        xs = self._spread([guess.units("x", f) for f in self.GRID])
+        ys = self._spread([guess.units("y", f) for f in self.GRID])
         seen_x: dict[int, list[float]] = {u: [] for u in xs}
         seen_y: dict[int, list[float]] = {u: [] for u in ys}
         missed = 0
@@ -731,6 +737,13 @@ class Phone:
         await self.reset()
         TELEMETRY.event("calibrate", res=res, missed=missed, x=px, y=py)
         return {"res": res, "grid_points_found": 9 - missed, "x": px, "y": py, "span": self.span}
+
+    @staticmethod
+    def _spread(units: list[int], least: int = 15) -> list[int]:
+        out: list[int] = []
+        for u in units:
+            out.append(max(u, (out[-1] + least) if out else least))
+        return out
 
     async def tap(self, x, y, precise: bool = False):
         await self.point(x, y)
