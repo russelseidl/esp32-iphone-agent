@@ -1024,3 +1024,19 @@ Spec coverage (sections 1 and 5): board log relay with rate limit and `LOG_BLE` 
 **PLAN_VERIFY_COVERAGE:** every task has a runnable verify (make/pytest/build/grep/HTTP call/field check). No PR is created by this plan (commits on the local branch), so no review task is required.
 
 **PLAN_TEST_PARITY:** Task 1: all branches of `hid_send_confirmed`, `pace_valid`, `ratelimit_take` have cases. Task 7: ring, counters, write-failure branches covered. Task 8: hid rise/no-rise, streak/clear, backoff cap covered. Task 3: `releaseMouse` retries<0 / >0 / ==0 branches — UNTESTED on host because they run on the Arduino core; exercised by the Task 11 field check (log lines and counters). Task 4/5/6: firmware-only logging branches — UNTESTED on host for the same reason, covered by Task 11 field check. Task 9/10: telemetry wiring and reconnect loop — UNTESTED by unit tests (asyncio + bleak), verified by the Task 9/10 HTTP checks.
+
+## Field check (2026-10-19, firmware af68ffa + mac 4ebab2d..34b4ee3, board ESP32 Agent 57CD, iPhone18,1 on iOS 26)
+
+1. `status` → `hid: {fail: 0, rel: 0}`, `logdrop: 0`. PASS.
+2. `pace 5 8` → `ok`; `pace 0 8` → `err usage: pace STEP(1-127) STEP_MS(1-50)` (reply captured in telemetry, 27.7 ms). PASS.
+3. Tap on the Clock icon opened Clock; `home` (edge drag) returned to the Home Screen with the pointer homed.
+   Command round trips: move 29-203 ms, click 119 ms, release 87-160 ms, paced corner move 2.6-2.9 s. No
+   `hid: mouse release not delivered` lines; counters stayed 0/0. PASS.
+4. `usbreset` (board on the Mac) → board log `usb: reset requested`, `usb: suspended`, `usb: mounted` within
+   1 s; the device re-enumerated with the same serial name. PASS. The BLE reconnect loop also recovered the
+   link on its own after the flash reboot (`recover reconnect ok after 1 s`).
+5. Lock 10 s / unlock / restart mirroring → board log shows `teardown (video)`, `teardown (session)`,
+   `rtsp: connection closed`, then the full pair/fp-setup/mirror handshake on restart. No `usb: suspended`
+   within a 10 s lock: iOS keeps the HID link awake for a while after locking (the suspend seen earlier in the
+   day followed a multi-minute lock). PASS with that note. Also observed: iOS re-sent SPS/PPS twice during a
+   session (13:06:22, 13:06:27), so keyframes are not strictly once per session.
