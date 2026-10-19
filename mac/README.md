@@ -57,6 +57,7 @@ use), runs the server from it as a user launchd agent serving MCP over HTTP on `
 | `open_app name` | Home → Search → type → Enter, verified by the screen changing; prefer it to hunting icons |
 | `search_in_app text [app]` | Cmd+K / Cmd+F when the app honours it (learned per app), then types |
 | `raw` | any protocol line from `docs/ble-protocol.md` |
+| `bench [axes] [taps_per_setting]` | A/B trials in a blank Freeform board: ranks settings (aim, pace, coex; res and fps need a mirroring restart) by tap error, then latency; writes `~/.esp32-agent/bench/<date>.md` |
 | `diagnostics` | last N telemetry events (commands, frames, link, board log, recoveries) and counters |
 | `usb_reset`, `pace` | re-enumerate the board on the phone; set pointer move pacing |
 
@@ -86,6 +87,14 @@ so an unlocked phone never idles to the lock screen; it cannot unlock a locked p
 `~/.esp32-agent/apps.json` records which keyboard shortcuts each app honours (seeded: Slack takes Cmd+K but not
 Cmd+H inside a text field; Muse takes none). `search_in_app` reads and updates it. `screenshot` ends with a
 state line (live/replaying, keyboard up/down, frame age) so a second screenshot is rarely needed.
+
+## Bench
+
+`bench` measures instead of guessing: open a blank Freeform board with the pen selected, call `bench` with the
+axes to sweep, and each setting gets five planned taps whose dots are read back from the frame (tap error in
+0-1000 units) together with the step latency and BLE drops. One axis at a time from the baseline; the
+baseline is restored afterwards and the dots undone. Results: `~/.esp32-agent/bench/<date>.md` and `trial`
+rows in the telemetry. `res` and `fps` only change on the next mirroring session, so sweep those by hand.
 
 ## Telemetry and self-recovery
 
