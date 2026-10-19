@@ -205,7 +205,7 @@ from calibration import Calibration
 def test_affine_roundtrip_from_legacy_dict():
     c = Calibration.from_dict({"ax": 0.00372, "bx": 0.04571, "ay": 0.00162, "by": 0.02429})
     assert c.model == "affine"
-    assert c.units("x", 0.609) == 151 and c.units("y", 0.921) == 555
+    assert c.units("x", 0.609) == 151 and c.units("y", 0.921) == 554
     assert abs(c.frac("x", 151) - 0.6075) < 0.002
 
 
