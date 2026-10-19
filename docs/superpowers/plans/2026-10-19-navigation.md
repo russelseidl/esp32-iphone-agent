@@ -509,3 +509,11 @@ back; the tools are installed and the agent is running.
   (no caught-up client, so no compaction): blind until mirroring restarts. That is now addressed by the
   resumable stream (spec section 5 amendment; `mac/spool.py`, `stream on TS`), to be field-checked after
   the next flash.
+
+### Resumable stream, field check 2026-10-19 15:46
+
+Flashed, mirroring restarted, stream live with the spool tracking the board's buffer (343 KB each). Agent
+restarted with `launchctl kickstart`: live again 10 s later (launchd + BLE scan + 1 s for the first status).
+Log: "re-fed 392 access units (358 KB) from the spool; resuming at board ts 146740"; board: "stream: resumed
+at AU 391 of 435". Before this change the same restart replayed the whole buffer for minutes and, at 4 MB,
+overflowed the board (blind until a mirroring restart).
