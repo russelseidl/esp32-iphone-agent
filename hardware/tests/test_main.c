@@ -136,6 +136,26 @@ static void test_gop(void) {
   CHECK(!avcc_to_annexb(bad, sizeof bad));
 }
 
+static void test_gop_resume(void) {
+  static uint8_t arena[100];
+  static gop_au aus[4];
+  gop_buf g;
+  gop_init(&g, arena, sizeof arena, aus, 4);
+  uint8_t au[30] = {0, 0, 0, 1, 0x41};
+  CHECK(gop_resume_index(&g, 5) == 0);  // nothing buffered: whatever comes is a fresh start
+  CHECK(gop_push(&g, au, 30, true, 10) == 0 && gop_push(&g, au, 30, false, 20) == 1 && gop_push(&g, au, 30, false, 30) == 2);
+  CHECK(gop_resume_index(&g, 5) == 0);   // the client's last AU predates this GOP: full replay
+  CHECK(gop_resume_index(&g, 10) == 1);  // has the IDR: continue with the P-frames
+  CHECK(gop_resume_index(&g, 25) == 2);
+  CHECK(gop_resume_index(&g, 30) == 3);  // has everything
+  CHECK(gop_resume_index(&g, 99) == 3);
+  gop_mark_sent(&g, g.gen, 1);
+  CHECK(gop_push(&g, au, 30, false, 40) == 1 && g.cont && g.n == 2);  // compacted: AUs 10 and 20 are gone
+  CHECK(gop_resume_index(&g, 20) == -1);  // never got AU 30, which is now the start: wait for an IDR
+  CHECK(gop_resume_index(&g, 30) == 1);   // has AU 30: continue at 40
+  CHECK(gop_resume_index(&g, 40) == 2);
+}
+
 static void test_chunker(void) {
   uint8_t data[100], out[64], got[100];
   for (int i = 0; i < 100; i++) data[i] = (uint8_t)i;
@@ -205,6 +225,7 @@ int main(void) {
   test_bplist_roundtrip();
   test_bplist_utf16();
   test_gop();
+  test_gop_resume();
   test_chunker();
   test_hidretry();
   printf(fails ? "%d FAILED\n" : "all tests passed\n", fails);

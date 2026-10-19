@@ -68,10 +68,13 @@ how to drive the phone (short swipes, screenshot after every action, type only w
 
 The server keeps `stream on` for as long as it is linked and pipes every access unit into one long-lived ffmpeg
 (single-threaded, low-delay: anything else parks 14-16 frames in the pipeline), keeping the newest decoded frame.
-iOS sends one keyframe per mirroring session and P-frames after it, so after every (re)connect the board first
-replays its whole buffer since that keyframe (up to 4 MB, at 100-200 kbps over BLE). `status` → `video.live` says
-whether the picture is current; `screenshot` returns a warning with the frame until it is. Restarting Screen
-Mirroring on the phone starts a fresh, small buffer and is the fastest way out of a long replay.
+iOS sends one keyframe per mirroring session and P-frames after it. The server spools every access unit since
+its last keyframe to `~/.esp32-agent/gop.bin`; after a (re)connect or a restart it re-feeds that copy to a fresh
+decoder (seconds) and asks the board for only what came after it (`stream on <ts>`), so the board replays its
+whole buffer (up to 4 MB, minutes at 100-200 kbps over BLE) only when there is no usable spool: first start,
+a rebooted board, or firmware older than this repo's. `status` → `video.live` says whether the picture is
+current; `screenshot` returns a warning with the frame until it is. Restarting Screen Mirroring on the phone
+starts a fresh, small buffer and is the fastest way out of a long replay.
 The board's buffer is capped at 4 MB. With the firmware in this repo, an overflow while this server is streaming
 and caught up drops only the part already received, so the live picture continues indefinitely. `snap`, or a
 freshly (re)connected stream, cannot use such a buffer: after a server restart or BLE drop during a long session

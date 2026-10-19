@@ -166,8 +166,10 @@ String board(const String &line, const String &id) {
   long a = 0, b = 0;
   int n = sscanf(arg.c_str(), "%ld %ld", &a, &b);
   if (cmd == "stream") {
-    if (arg != "on" && arg != "off") return "err usage: stream on|off";
-    video_stream(arg == "on");
+    unsigned long ts = 0;
+    bool on = arg == "on" || sscanf(arg.c_str(), "on %lu", &ts) == 1;
+    if (!on && arg != "off") return "err usage: stream on [TS]|off";
+    video_stream(on, ts);
     return "ok";
   }
   if (cmd == "app" || cmd == "log") {  // debug relay: Mac -> app ("app run ...") and app -> Mac ("log ...")

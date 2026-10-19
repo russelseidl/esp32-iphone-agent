@@ -6,7 +6,7 @@
 bool video_begin();
 void video_on_config(const uint8_t *sps_pps, size_t len);  // AirPlay callbacks (mirror task)
 void video_on_au(const uint8_t *au, size_t len, bool idr);
-void video_stream(bool on);
+void video_stream(bool on, uint32_t resume_ts = 0);  // resume_ts: the client holds every AU up to that board ms
 void video_snap(const String &id);               // replies "<id> ok" when the GOP is sent
 void video_bench(const String &id, uint32_t kb);  // replies "<id> ok <ms>"
 

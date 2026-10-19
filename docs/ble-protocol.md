@@ -21,7 +21,12 @@ Full UUID = `6e400001-a9e8-4b1b-9c39-6d6f8a3c` + 4-hex suffix, e.g. cmd = `6e400
 Existing HID commands, unchanged semantics from the old TCP protocol:
 `ping`, `home`, `move DX DY`, `press`, `release`, `click`, `scroll A B`, `type TEXT`, `key COMBO`.
 New:
-- `stream on|off` — continuously forward every access unit over `video` (default off).
+- `stream on [TS]|off` — continuously forward every access unit over `video` (default off). `stream on`
+  starts with CONFIG and the whole GOP since the IDR. `stream on TS`, from a client that already holds every
+  AU up to board time TS (the Mac keeps its copy on disk), continues with the first AU newer than TS and
+  sends no CONFIG and no replay. The board falls back to a full replay when its buffer restarted after TS
+  (a new IDR), or when TS is in the future (another boot); into a continuation whose start the client never
+  received it sends nothing until the next IDR (logged).
 - `snap` — send SPS/PPS + every AU since the last IDR (the current GOP), then reply `ok`.
   Replies `err no video (buffer overflowed, waiting for a keyframe: ...)` while the board's buffer is a
   continuation (see below): it cannot be decoded from its first AU.

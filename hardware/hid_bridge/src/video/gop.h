@@ -45,6 +45,10 @@ int gop_push(gop_buf *g, const uint8_t *annexb, size_t len, bool idr, uint32_t t
 // The streaming client has received AU idx of generation gen (ignored for another generation);
 // idx < 0 forgets the client (e.g. it disconnected), so an overflow drops the whole GOP again.
 void gop_mark_sent(gop_buf *g, uint32_t gen, int idx);
+// Where a streaming client that already holds every AU up to board time `ts` continues: the index of the
+// first AU newer than ts (n when it has everything). 0 when the buffer restarted after the client's last
+// AU (full replay from the IDR); -1 when the buffer is a continuation whose start the client never got.
+int gop_resume_index(const gop_buf *g, uint32_t ts);
 // True if the Annex-B data contains an IDR slice (NAL type 5).
 bool annexb_has_idr(const uint8_t *p, size_t len);
 // Rewrites AVCC (4-byte big-endian length prefixes) in place into Annex-B start codes.

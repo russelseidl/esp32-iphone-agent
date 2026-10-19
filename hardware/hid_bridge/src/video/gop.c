@@ -68,6 +68,14 @@ void gop_mark_sent(gop_buf *g, uint32_t gen, int idx) {
   else if (g->gen == gen && idx + 1 > g->keep_from && idx < g->n) g->keep_from = idx + 1;
 }
 
+int gop_resume_index(const gop_buf *g, uint32_t ts) {
+  if (g->n == 0 || g->wait_idr) return 0;
+  if (g->aus[0].ts > ts) return g->cont ? -1 : 0;
+  int i = 0;
+  while (i < g->n && g->aus[i].ts <= ts) i++;
+  return i;
+}
+
 bool annexb_has_idr(const uint8_t *p, size_t len) {
   for (size_t i = 0; i + 4 < len; i++)
     if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1 && (p[i + 3] & 0x1f) == 5) return true;

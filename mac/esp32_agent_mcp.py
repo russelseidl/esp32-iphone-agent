@@ -37,6 +37,7 @@ from bench import Trial, find_dots, match_dots, pick_winners, summarize, to_mark
 from calibration import Calibration
 from pointer import Frame, changed_fraction, locate
 from screen import keyboard_visible
+from spool import Spool
 from telemetry import Telemetry
 from watchdog import StuckDetector, backoff
 
@@ -80,6 +81,11 @@ class Reassembler:
         self.gop_bytes = 0  # AU bytes since the last CONFIG: comparable with the board's status.gop
         self.last_ts = 0    # board ts of the newest complete AU
         self.last_at = None
+
+    def resume(self, gop_bytes: int, last_ts: int):
+        """We already hold the GOP up to board time last_ts (the spool): accept P-frames straight away."""
+        self.waiting = False
+        self.gop_bytes, self.last_ts = gop_bytes, last_ts
 
     def feed(self, data: bytes):
         self.last_at = time.monotonic()
@@ -193,7 +199,8 @@ class Link:
         self.status: dict = {}
         self.status_at = 0.0
         self.decoder = Decoder()
-        self.video = Reassembler(self.decoder.feed)
+        self.spool = Spool(HOME / "gop.bin")  # our copy of the GOP, so a restart resumes instead of replaying
+        self.video = Reassembler(self._on_au)
         self.write_lock = asyncio.Lock()
         self.connect_lock = asyncio.Lock()
         self.links = 0  # bumped per (re)connect, so the pointer knows to release and re-home
@@ -222,16 +229,57 @@ class Link:
             client = BleakClient(dev, timeout=20, disconnected_callback=self._on_disconnect)
             await client.connect()
             await client.start_notify(REPLY, self._on_reply)
+            self.status_at = 0.0
             await client.start_notify(STATUS, self._on_status)
-            self.video = Reassembler(self.decoder.feed)
+            self.video = Reassembler(self._on_au)
             await self.decoder.start()
+            resume_ts = await self._refeed_spool()
             await client.start_notify(VIDEO, lambda _, d: self.video.feed(bytes(d)))
             self.client, self.name, self.links = client, dev.name, self.links + 1
             log.info("connected to %s (%s), mtu %s", dev.name, dev.address, client.mtu_size)
             TELEMETRY.event("link", state="connected", name=dev.name, mtu=client.mtu_size)
-            await self._cmd("stream on")  # keep the mirror flowing into the decoder for as long as we are linked
+            await self._stream_on(resume_ts)  # keep the mirror flowing into the decoder for as long as we are linked
             if KEEP_AWAKE_S and (self._keeper is None or self._keeper.done()):
                 self._keeper = asyncio.create_task(self._keep_awake())
+
+    def _on_au(self, au: bytes, flags: int, ts: int):
+        self.spool.record(au, flags, ts)
+        self.decoder.feed(au, flags, ts)
+
+    async def _refeed_spool(self) -> int:
+        """Decode our own copy of the GOP (seconds, local) so the board only has to send what came after it.
+        Returns the board timestamp to resume from, or 0 when there is nothing usable (another boot, no spool)."""
+        for _ in range(20):  # the first status (1 Hz) says which boot the board is on
+            if self.status_at:
+                break
+            await asyncio.sleep(0.1)
+        aus = self.spool.load()
+        if not aus:
+            return 0
+        up = int(self.status.get("up", 0))
+        if not self.status_at or not self.spool.same_boot(up):
+            TELEMETRY.event("replay", resume=False, why="board rebooted or no sidecar", spool_aus=len(aus))
+            self.spool.clear()
+            return 0
+        for au, flags, ts in aus:
+            self.decoder.feed(au, flags, ts)
+        self.video.resume(self.spool.bytes, self.spool.last_ts)
+        TELEMETRY.event("replay", resume=True, spool_aus=len(aus), spool_bytes=self.spool.bytes, last_ts=self.spool.last_ts)
+        log.info("re-fed %d access units (%d KB) from the spool; resuming at board ts %d",
+                 len(aus), self.spool.bytes // 1024, self.spool.last_ts)
+        return self.spool.last_ts
+
+    async def _stream_on(self, resume_ts: int):
+        if resume_ts:
+            try:
+                await self._cmd(f"stream on {resume_ts}")
+                return
+            except RuntimeError as e:  # firmware without resume support: replay from the keyframe
+                if "usage" not in str(e):
+                    raise
+                log.warning("board does not support 'stream on TS' (old firmware): replaying")
+                self.video = Reassembler(self._on_au)  # the notify handler reads self.video at call time
+        await self._cmd("stream on")
 
     async def _keep_awake(self):
         """While nothing else is happening, wiggle the pointer by one unit every KEEP_AWAKE_S seconds: iOS counts
@@ -300,6 +348,7 @@ class Link:
         try:
             self.status = json.loads(data)
             self.status_at = time.monotonic()
+            self.spool.note_board(int(self.status.get("up", 0)))
             fail = int(self.status.get("hid", {}).get("fail", 0))
             if self.stuck.hid(fail) and self._recovering is None:
                 self._recovering = asyncio.get_running_loop().create_task(self.usb_reset("hid.fail rose"))

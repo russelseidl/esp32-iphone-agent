@@ -24,6 +24,7 @@ static uint8_t *scratch;
 static QueueHandle_t reqs;
 static TaskHandle_t task;
 static volatile bool streaming;
+static volatile uint32_t resumeTs;  // `stream on TS`: the client holds every AU up to board time TS
 static uint16_t seq;
 static uint8_t chunk[VCHUNK_HDR + MAX_CHUNK];
 static uint32_t winStart, winBytes, winFrames, lastIdr;
@@ -68,6 +69,14 @@ static bool snapshot(uint32_t *gen, int *n, bool *cont, uint8_t *cfg, size_t *cf
   memcpy(cfg, gop.cfg, gop.cfg_len);
   xSemaphoreGive(lock);
   return *n > 0 && *cfg_len > 0;
+}
+
+// Where a client that holds everything up to board time ts continues in generation gen (gop_resume_index).
+static int resumeIndex(uint32_t gen, uint32_t ts) {
+  xSemaphoreTake(lock, portMAX_DELAY);
+  int i = gop.gen == gen ? gop_resume_index(&gop, ts) : 0;
+  xSemaphoreGive(lock);
+  return i;
 }
 
 // Tells the GOP which AUs the streaming client has, so an overflow keeps only what it still needs.
@@ -138,10 +147,19 @@ static void streamStep() {
   bool cont;
   if (!snapshot(&gen, &n, &cont, cfg, &cfg_len, &cfg_ts)) return;
   if (gen != txGen) {
-    if (cont && txGen != gen - 1) return;  // not our continuation: wait for an IDR
+    // a client that kept its copy of the GOP (`stream on TS`) continues after its last AU: no config, no
+    // replay. A TS from another boot (in the future) or from before a continuation's start cannot be used.
+    uint32_t rts = resumeTs;
+    resumeTs = 0;
+    int from = rts && rts <= millis() ? resumeIndex(gen, rts) : 0;
+    if (rts && from < 0) { boardLog("stream: cannot resume into a continuation, waiting for an IDR"); return; }
+    if (!rts && cont && txGen != gen - 1) return;  // not our continuation: wait for an IDR
     txGen = gen;
-    next = 0;
-    if (!sendAu(cfg, cfg_len, VF_CONFIG, cfg_ts)) { markSent(gen, -1); txGen = UINT32_MAX; return; }
+    next = from;
+    if (from > 0) {
+      boardLog("stream: resumed at AU %d of %d", from, n);
+      markSent(gen, from - 1);
+    } else if (!sendAu(cfg, cfg_len, VF_CONFIG, cfg_ts)) { markSent(gen, -1); txGen = UINT32_MAX; return; }
   }
   for (gop_au au; next < n && copyAu(gen, next, &au); next++) {
     if (!sendAu(scratch, au.len, au.idr ? VF_IDR : 0, au.ts)) { markSent(gen, -1); txGen = UINT32_MAX; return; }
@@ -209,7 +227,10 @@ void video_on_au(const uint8_t *au, size_t len, bool idr) {
   xTaskNotifyGive(task);
 }
 
-void video_stream(bool on) { streaming = on; }
+void video_stream(bool on, uint32_t resume_ts) {
+  resumeTs = on ? resume_ts : 0;
+  streaming = on;
+}
 
 static void request(const String &id, bool bench, uint32_t kb) {
   Req r = {{0}, kb, bench};

@@ -127,6 +127,13 @@ Firmware (`hardware/hid_bridge`):
   per 30 s). The ported receiver has no stop/restart API; a restart is deferred until telemetry shows stalls
   that a phone-side mirroring restart does not explain.
 - `VIDEO_TIMEOUT_MS` 1500 -> 4000: a BLE stall pauses the stream instead of forcing a full replay.
+- Resumable stream (added 2026-10-19 after the field check): the Mac spools every access unit since its
+  last keyframe to `~/.esp32-agent/gop.bin` and, on a (re)connect or an agent restart, re-feeds it to a
+  fresh decoder and sends `stream on <last board ts>`; the board continues from the first newer AU with no
+  CONFIG and no replay. Reason: an agent restart replayed the board's whole buffer for minutes over BLE,
+  and the buffer overflowed meanwhile (the streaming client was not caught up, so no compaction), leaving
+  the board blind until the phone restarted mirroring. A sidecar notes the board's uptime so a rebooted
+  board (timestamps restarted) gets a plain replay.
 
 Mac watchdogs (server):
 

@@ -491,3 +491,21 @@ back; the tools are installed and the agent is running.
 - Vertical pointer travel changed in the same period (495 units reached 0.646 instead of 0.792; taps aimed at
   y=822 landed at the bottom edge). A phone restart is the next test; if it clears both, the Mac should
   recalibrate and re-probe system shortcuts whenever the stuck detector fires.
+
+### Field notes, 2026-10-19 15:05-15:25 (after the phone restart)
+
+- The restart cleared both faults: Cmd+Space and Cmd+H are honoured again and the vertical map is back
+  (recalibrated with `calibrate_auto`).
+- `open_app`: first run reported "opened" for Slack, Clock and Muse, but the frames showed Search still open
+  with "vclock" typed. Cause: the Home flick's frame burst was still draining when Cmd+Space was sent, the
+  keyboard was not seen in 5 s, and the Search-pill fallback tapped the "v" key of the already-open Search.
+  Fixed: the Home reference is a frame captured after the flick (up to 15 s), the keyboard wait is 8 s, the
+  fallback fires only when a post-command frame still looks like Home, and "opened" also requires the
+  keyboard to be gone (Search dismissed). Re-run: Clock ok (keyboard seen 0.6 s after the key), Slack ok
+  (15 s: still draining Clock's close), a bogus name reports "no effect".
+- Measured: Cmd+Space -> keyboard visible in 3.5 s on an idle link; the link needs 10-15 s to drain the burst
+  of an app closing.
+- An agent restart during the check replayed the 4 MB buffer for minutes and the board overflowed meanwhile
+  (no caught-up client, so no compaction): blind until mirroring restarts. That is now addressed by the
+  resumable stream (spec section 5 amendment; `mac/spool.py`, `stream on TS`), to be field-checked after
+  the next flash.
