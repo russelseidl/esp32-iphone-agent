@@ -8,7 +8,7 @@ from statistics import mean, median
 
 from pointer import Frame, _blobs
 
-CANVAS_WHITE = 0.80     # share of pixels above WHITE_LEVEL for a frame to count as a blank canvas
+CANVAS_WHITE = 0.70     # share of pixels above WHITE_LEVEL for a frame to count as a blank canvas (measured: a blank Freeform board with the markup toolbar and the Dynamic Island is 0.785)
 WHITE_LEVEL = 225
 DOT_LEVEL = 120
 DOT_MIN, DOT_MAX = 6, 900   # blob size bounds in pixels at the frame's scale
