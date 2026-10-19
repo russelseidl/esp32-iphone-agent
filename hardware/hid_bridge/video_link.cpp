@@ -55,16 +55,25 @@ static bool copyAu(uint32_t gen, int i, gop_au *au) {
   return ok;
 }
 
-// Snapshot of the GOP state: generation, AU count, SPS/PPS.
-static bool snapshot(uint32_t *gen, int *n, uint8_t *cfg, size_t *cfg_len, uint32_t *cfg_ts) {
+// Snapshot of the GOP state: generation, AU count, SPS/PPS. cont: the buffer continues a GOP whose
+// start was dropped (overflow); only the client that already received that start may use it.
+static bool snapshot(uint32_t *gen, int *n, bool *cont, uint8_t *cfg, size_t *cfg_len, uint32_t *cfg_ts) {
   xSemaphoreTake(lock, portMAX_DELAY);
   *gen = gop.gen;
   *n = gop.wait_idr ? 0 : gop.n;
+  *cont = gop.cont;
   *cfg_len = gop.cfg_len;
   *cfg_ts = gop.cfg_ts;
   memcpy(cfg, gop.cfg, gop.cfg_len);
   xSemaphoreGive(lock);
   return *n > 0 && *cfg_len > 0;
+}
+
+// Tells the GOP which AUs the streaming client has, so an overflow keeps only what it still needs.
+static void markSent(uint32_t gen, int idx) {
+  xSemaphoreTake(lock, portMAX_DELAY);
+  gop_mark_sent(&gop, gen, idx);
+  xSemaphoreGive(lock);
 }
 
 static String doSnap() {
@@ -74,7 +83,9 @@ static String doSnap() {
     uint32_t gen, cfg_ts;
     size_t cfg_len;
     int n;
-    if (!snapshot(&gen, &n, cfg, &cfg_len, &cfg_ts)) return "err no video (start screen mirroring)";
+    bool cont;
+    if (!snapshot(&gen, &n, &cont, cfg, &cfg_len, &cfg_ts)) return "err no video (start screen mirroring)";
+    if (cont) return "err no video (buffer overflowed, waiting for a keyframe: restart screen mirroring)";
     if (!sendAu(cfg, cfg_len, VF_CONFIG | VF_SNAP, cfg_ts)) return "err ble send failed";
     bool complete = true;
     for (int i = 0; i < n && complete; i++) {
@@ -107,26 +118,34 @@ static String doBench(uint32_t kb) {
 
 // Continuous mode: send every AU once, catching up from the GOP's IDR when streaming starts (P-frames
 // can't be skipped: each needs the one before, and the next IDR may be minutes away). After a failed
-// send, start over from the GOP's IDR.
+// send, start over from the GOP's IDR. When the GOP overflows while this client is caught up, the GOP
+// drops only what was already sent (gop_mark_sent) and comes back as a "cont" generation: the client that
+// streamed the previous generation just carries on (config is resent, harmless); anyone else waits for
+// the next IDR, since that buffer cannot be decoded from its first AU.
 static void streamStep() {
   static uint32_t txGen = UINT32_MAX;
   static int next;
   static uint8_t cfg[GOP_CFG_MAX];
   if (!streaming || !ble_video_room()) {
+    if (txGen != UINT32_MAX) markSent(txGen, -1);  // nobody to continue for: an overflow drops everything
     txGen = UINT32_MAX;  // resend config + whole GOP when streaming resumes
     return;
   }
   uint32_t gen, cfg_ts;
   size_t cfg_len;
   int n;
-  if (!snapshot(&gen, &n, cfg, &cfg_len, &cfg_ts)) return;
+  bool cont;
+  if (!snapshot(&gen, &n, &cont, cfg, &cfg_len, &cfg_ts)) return;
   if (gen != txGen) {
+    if (cont && txGen != gen - 1) return;  // not our continuation: wait for an IDR
     txGen = gen;
     next = 0;
-    if (!sendAu(cfg, cfg_len, VF_CONFIG, cfg_ts)) { txGen = UINT32_MAX; return; }
+    if (!sendAu(cfg, cfg_len, VF_CONFIG, cfg_ts)) { markSent(gen, -1); txGen = UINT32_MAX; return; }
   }
-  for (gop_au au; next < n && copyAu(gen, next, &au); next++)
-    if (!sendAu(scratch, au.len, au.idr ? VF_IDR : 0, au.ts)) { txGen = UINT32_MAX; return; }
+  for (gop_au au; next < n && copyAu(gen, next, &au); next++) {
+    if (!sendAu(scratch, au.len, au.idr ? VF_IDR : 0, au.ts)) { markSent(gen, -1); txGen = UINT32_MAX; return; }
+    markSent(gen, next);
+  }
 }
 
 static void videoTask(void *) {

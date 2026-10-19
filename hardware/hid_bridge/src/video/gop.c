@@ -21,7 +21,26 @@ void gop_set_config(gop_buf *g, const uint8_t *annexb, size_t len, uint32_t ts) 
 static void restart(gop_buf *g) {
   g->used = 0;
   g->n = 0;
+  g->keep_from = 0;
+  g->cont = false;
   g->gen++;
+}
+
+// Drops the AUs the streaming client already has and moves the rest to the front of the arena.
+static void compact(gop_buf *g) {
+  int k = g->keep_from, left = g->n - k;
+  size_t base = g->aus[k].off;
+  memmove(g->arena, g->arena + base, g->used - base);
+  for (int i = 0; i < left; i++) {
+    g->aus[i] = g->aus[k + i];
+    g->aus[i].off -= base;
+  }
+  g->used -= base;
+  g->n = left;
+  g->keep_from = 0;
+  g->cont = true;
+  g->gen++;
+  g->continuations++;
 }
 
 int gop_push(gop_buf *g, const uint8_t *annexb, size_t len, bool idr, uint32_t ts) {
@@ -31,6 +50,7 @@ int gop_push(gop_buf *g, const uint8_t *annexb, size_t len, bool idr, uint32_t t
   } else if (g->wait_idr) {
     return -1;
   }
+  if ((g->used + len > g->cap || g->n == g->max) && g->keep_from > 0) compact(g);
   if (g->used + len > g->cap || g->n == g->max) {  // GOP too big: drop it and wait for the next IDR
     restart(g);
     g->wait_idr = true;
@@ -41,6 +61,11 @@ int gop_push(gop_buf *g, const uint8_t *annexb, size_t len, bool idr, uint32_t t
   g->aus[g->n] = (gop_au){(uint32_t)g->used, (uint32_t)len, ts, idr};
   g->used += len;
   return g->n++;
+}
+
+void gop_mark_sent(gop_buf *g, uint32_t gen, int idx) {
+  if (idx < 0) g->keep_from = 0;
+  else if (g->gen == gen && idx + 1 > g->keep_from && idx < g->n) g->keep_from = idx + 1;
 }
 
 bool annexb_has_idr(const uint8_t *p, size_t len) {

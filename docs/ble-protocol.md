@@ -23,6 +23,8 @@ Existing HID commands, unchanged semantics from the old TCP protocol:
 New:
 - `stream on|off` — continuously forward every access unit over `video` (default off).
 - `snap` — send SPS/PPS + every AU since the last IDR (the current GOP), then reply `ok`.
+  Replies `err no video (buffer overflowed, waiting for a keyframe: ...)` while the board's buffer is a
+  continuation (see below): it cannot be decoded from its first AU.
 - `res W H` — AirPlay resolution advertised in `/info` (default 480 1040), stored in NVS; takes effect on the next mirroring session.
 - `fps N` — max fps advertised (default 5), stored in NVS.
 - `bench KB` — send KB kilobytes of filler on `video` with the `bench` flag, then reply `ok <ms>`.
@@ -55,6 +57,13 @@ bit4 BENCH (filler, ignore), bit5 SNAP (part of a snap reply).
 Payload is Annex-B (`00 00 00 01` start codes). On a START chunk the first 4 payload bytes are a u32 LE
 board timestamp (ms) for latency stats, followed by the Annex-B data.
 `seq` increments per notify; the app counts gaps as drops and waits for the next IDR/CONFIG after a gap.
+
+GOP buffer overflow (4 MB, or 8192 AUs): iOS sends one IDR per mirroring session, so a long session outgrows
+the buffer. If a `stream on` client has received the whole buffer so far, the board drops only the AUs that
+client already has and keeps the rest (a *continuation*): that client gets CONFIG again and then the remaining
+and all new AUs, and sees no gap. A continuation cannot be decoded from its start, so `snap` and a client that
+starts `stream on` later get nothing until the next IDR (restart Screen Mirroring on the phone). Without a
+caught-up streaming client the whole buffer is dropped until the next IDR, as before.
 
 ## net (JSON)
 Read: `{"mode":"ap","ssid":"ESP32Agent-1A2B","pass":"<random 12 chars>","ip":"192.168.4.1"}`

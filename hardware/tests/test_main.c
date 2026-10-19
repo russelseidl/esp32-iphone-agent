@@ -97,6 +97,34 @@ static void test_gop(void) {
   CHECK(gop_push(&g, au, 10, false, 6) == -1);
   CHECK(gop_push(&g, au, 10, true, 7) == 0 && !g.wait_idr);
 
+  // overflow while a streaming client is caught up: keep the AUs it has not received yet
+  gop_init(&g, arena, sizeof arena, aus, 4);
+  uint8_t a0[30] = {0}, a1[30] = {1}, a2[30] = {2}, a3[30] = {3};
+  CHECK(gop_push(&g, a0, 30, true, 1) == 0 && gop_push(&g, a1, 30, false, 2) == 1 && gop_push(&g, a2, 30, false, 3) == 2);
+  uint32_t gen = g.gen;
+  gop_mark_sent(&g, gen + 1, 2);  // another generation: ignored
+  CHECK(g.keep_from == 0);
+  gop_mark_sent(&g, gen, 0);
+  gop_mark_sent(&g, gen, 1);
+  CHECK(g.keep_from == 2);
+  CHECK(gop_push(&g, a3, 30, false, 4) == 1);  // a0, a1 dropped; a2 kept at 0, a3 at 1
+  CHECK(g.gen == gen + 1 && g.cont && !g.wait_idr && g.n == 2 && g.used == 60 && g.keep_from == 0);
+  CHECK(g.continuations == 1 && g.overflows == 0);  // a compaction is not a drop
+  CHECK(g.aus[0].off == 0 && g.aus[0].ts == 3 && g.arena[0] == 2 && g.aus[1].off == 30 && g.aus[1].ts == 4 && g.arena[30] == 3);
+  gop_mark_sent(&g, g.gen, 0);
+  CHECK(gop_push(&g, a0, 30, false, 5) == 2 && g.n == 3 && g.used == 90);
+  CHECK(gop_push(&g, a1, 30, false, 6) == 2 && g.n == 3 && g.gen == gen + 2 && g.cont);  // compacted again
+  gop_mark_sent(&g, g.gen, -1);  // client gone: the next overflow drops everything
+  CHECK(g.keep_from == 0);
+  CHECK(gop_push(&g, a2, 30, false, 7) == -1 && g.n == 0 && g.wait_idr && !g.cont && g.overflows == 1);
+  CHECK(gop_push(&g, a0, 30, true, 8) == 0 && !g.cont && !g.wait_idr);  // an IDR clears the continuation
+  // a tail that is itself too big for the arena is dropped, not compacted into garbage
+  gop_init(&g, arena, sizeof arena, aus, 4);
+  uint8_t big[70] = {9};
+  CHECK(gop_push(&g, a0, 30, true, 1) == 0 && gop_push(&g, big, 70, false, 2) == 1);
+  gop_mark_sent(&g, g.gen, 0);
+  CHECK(gop_push(&g, big, 70, false, 3) == -1 && g.wait_idr && g.n == 0);
+
   uint8_t idr[] = {0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x65, 9};
   CHECK(annexb_has_idr(idr, sizeof idr));
   CHECK(!annexb_has_idr(idr, 6));

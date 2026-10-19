@@ -28,14 +28,23 @@ typedef struct {
   size_t cfg_len;
   uint32_t cfg_ts;
   bool wait_idr;    // overflow or start: drop until the next IDR
-  uint32_t gen;     // bumps whenever the buffer restarts
-  uint32_t overflows;
+  bool cont;        // the AUs before index 0 were dropped: a client that already has them can continue,
+                    // nobody can start decoding here (cleared by the next IDR)
+  int keep_from;    // AUs below this index were already delivered to the streaming client (gop_mark_sent)
+  uint32_t gen;     // bumps whenever the buffer restarts or is compacted
+  uint32_t overflows, continuations;
 } gop_buf;
 
 void gop_init(gop_buf *g, uint8_t *arena, size_t cap, gop_au *aus, int max);
 void gop_set_config(gop_buf *g, const uint8_t *annexb, size_t len, uint32_t ts);
 // Appends one Annex-B access unit. Returns its index, or -1 if it was dropped.
+// On overflow: if a streaming client has already received the first keep_from AUs (gop_mark_sent),
+// those are dropped and the rest kept (new generation, cont = true) so that client keeps getting
+// live video; otherwise, or if that still does not fit, the whole GOP is dropped until the next IDR.
 int gop_push(gop_buf *g, const uint8_t *annexb, size_t len, bool idr, uint32_t ts);
+// The streaming client has received AU idx of generation gen (ignored for another generation);
+// idx < 0 forgets the client (e.g. it disconnected), so an overflow drops the whole GOP again.
+void gop_mark_sent(gop_buf *g, uint32_t gen, int idx);
 // True if the Annex-B data contains an IDR slice (NAL type 5).
 bool annexb_has_idr(const uint8_t *p, size_t len);
 // Rewrites AVCC (4-byte big-endian length prefixes) in place into Annex-B start codes.
