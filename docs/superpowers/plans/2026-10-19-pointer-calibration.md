@@ -661,3 +661,25 @@ Spec coverage (section 2): finder by nudge differencing with settle check and ed
 **PLAN_VERIFY_COVERAGE:** every task has a runnable verify (pytest, py_compile + grep, field check with expected outputs, grep for docs). No PR, so no review task.
 
 **PLAN_TEST_PARITY:** Task 1: too-few / too-many / too-wide / one-sided / scale branches covered. Task 2: affine, pwl interpolation, extrapolation, clamp at 0, non-monotone rejection, learn reach and monotone guard (the "beyond reach" and "would break monotone" branches are exercised indirectly by the blend test staying within bounds — UNTESTED directly because they only refuse an update; the field check covers them), roundtrip, `ready`. Task 3: server glue (asyncio + BLE) — UNTESTED by unit tests, covered by the Task 4 field check.
+
+## Field check (2026-10-19, mac 664be20 and later, board ESP32 Agent 57CD on iOS 26)
+
+1. `calibrate_auto`: 9 of 9 grid points found in 31 s, `calibration_model: pwl`. Knots (units -> fraction),
+   each measured as one move from the homed corner: x 0->0.155, 50->0.341, 155->0.723, 259->0.989;
+   y 0->0.005, 81->0.137, 288->0.472, 495->0.792. The homed position with a paced corner push is
+   (0.155, 0.005), not the (0.046, 0.021) the firmware's burst `home` gives; the map is consistent with it.
+2. `find_pointer`: consistent to 1 unit across repeats ([45,21] twice at the burst-homed corner;
+   [419,270] twice after `move 100 150`). What it took to get there: iOS hides an idle pointer, so a
+   "before" frame may show nothing (nudge out then back instead); the mirror runs ~0.5 s behind, so frames
+   are selected by board timestamp; a 12-unit nudge barely moves the pointer (30 is used); the Clock icon's
+   second hand is a permanent small change that the blob pairing ignores; a screen change bursts frames
+   and the finder waits up to 6 s for the link to be live again.
+3. Precise taps, 5 small targets, screenshot after each: Clock icon (miss 47 units before correction),
+   Home Screen Search pill, Slack icon (54), a dock icon (18), Chrome's menu button (25): 5 of 5 opened
+   the intended control after the correction. Plain taps would miss by up to ~5% on the right third of
+   the screen, so the navigator should use precise for anything under ~60 units.
+4. Home gesture: a paced 450-unit edge drag was read as the App Switcher about one time in three; a fast
+   flick (`pace 25 4` for the drag) gave 3 of 3 Home Screens.
+5. Observed: the phone tore the AirPlay session down nine seconds after it tried to add an audio stream
+   that the firmware "ignored" (13:32:53 -> 13:33:02). Backlog for the resilience plan: accept and discard
+   AirPlay audio instead of refusing it.

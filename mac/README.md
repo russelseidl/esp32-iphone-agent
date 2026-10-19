@@ -39,9 +39,8 @@ use), runs the server from it as a user launchd agent serving MCP over HTTP on `
    Wi-Fi name and password. On the iPhone join that Wi-Fi (Settings → Wi-Fi), then
    **Control Center → Screen Mirroring → ESP32 Agent**. The phone has no internet over that Wi-Fi; it keeps using
    cellular, which is fine because the model runs on the Mac.
-6. In Claude, call **`calibrate_start`**, note where the AssistiveTouch pointer (small grey circle) is in the returned
-   screenshot, then **`calibrate_move 140 350`** and note it again, then **`calibrate_fit [[60,100,x1,y1],[200,450,x2,y2]]`**.
-   Two points are needed: iOS pointer motion has an offset as well as a scale. Saved to `~/.esp32-agent/calibration.json`.
+6. In Claude, call **`calibrate_auto`** with the phone on its Home Screen (about 30 s). Re-run after changing
+   resolution or pace. Saved to `~/.esp32-agent/calibration.json`.
 
 ## Tools
 
@@ -50,8 +49,9 @@ use), runs the server from it as a user launchd agent serving MCP over HTTP on `
 | `status` | board/link/phone health plus hints on what is missing |
 | `hotspot_info` | the board's Wi-Fi name and password (pairs the Mac over BLE on first use) |
 | `screenshot` | current screen as PNG (default 480×1040; `raw "res W H"` changes it) |
-| `calibrate_start` / `calibrate_move` / `calibrate_fit` | two-point pointer calibration (`set_calibration` for scale only) |
-| `tap x y`, `long_press x y s`, `swipe x1 y1 x2 y2`, `path [[x,y],…]`, `scroll x y n` | gestures, 0-1000 coords |
+| `calibrate_auto` | automatic 3x3 grid calibration (piecewise map per axis); `calibrate_start`/`calibrate_move`/`calibrate_fit` remain as the manual two-point fallback |
+| `find_pointer` | where the pointer is, by nudging it and differencing frames |
+| `tap x y [precise]`, `long_press x y s`, `swipe x1 y1 x2 y2`, `path [[x,y],…]`, `scroll x y n` | gestures, 0-1000 coords; precise finds and corrects the pointer before clicking |
 | `type_text`, `key` | USB keyboard (ASCII; `enter`, `esc`, `backspace`, `cmd+h`, …) |
 | `home`, `back`, `reset_pointer` | Home Screen, back gesture, release + re-home the pointer |
 | `raw` | any protocol line from `docs/ble-protocol.md` |
