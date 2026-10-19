@@ -122,8 +122,9 @@ Firmware (`hardware/hid_bridge`):
 - `usbreset`: `tud_disconnect()`, 500 ms, `tud_connect()`; re-enumerates like a re-plug. Replies `ok` before
   disconnecting.
 - `pace STEP STEP_MS` sets the move pacing at run time (not stored).
-- AirPlay watchdog: if a station is on the hotspot but no mirroring session for 30 s, restart the receiver's
-  listening sockets.
+- AirPlay stall detection: if a station is on the hotspot but no mirroring session for 30 s, log it (once
+  per 30 s). The ported receiver has no stop/restart API; a restart is deferred until telemetry shows stalls
+  that a phone-side mirroring restart does not explain.
 - `VIDEO_TIMEOUT_MS` 1500 -> 4000: a BLE stall pauses the stream instead of forcing a full replay.
 
 Mac watchdogs (server):

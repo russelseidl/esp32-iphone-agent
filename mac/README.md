@@ -55,6 +55,8 @@ use), runs the server from it as a user launchd agent serving MCP over HTTP on `
 | `type_text`, `key` | USB keyboard (ASCII; `enter`, `esc`, `backspace`, `cmd+h`, …) |
 | `home`, `back`, `reset_pointer` | Home Screen, back gesture, release + re-home the pointer |
 | `raw` | any protocol line from `docs/ble-protocol.md` |
+| `diagnostics` | last N telemetry events (commands, frames, link, board log, recoveries) and counters |
+| `usb_reset`, `pace` | re-enumerate the board on the phone; set pointer move pacing |
 
 Coordinates are 0-1000 relative to the screenshot, as in `prompts/actor.md`; `prompts/` is good guidance for
 how to drive the phone (short swipes, screenshot after every action, type only when a field is focused).
@@ -76,6 +78,14 @@ Mirroring stops when the phone locks, and iOS suspends the board's USB link at t
 stay unlocked. While idle the server nudges the pointer by one unit every 20 s (`ESP32_AGENT_KEEPAWAKE`, 0 = off)
 so an unlocked phone never idles to the lock screen; it cannot unlock a locked phone. If mirroring stopped,
 `status` says so: choose Control Center → Screen Mirroring → ESP32 Agent again.
+
+## Telemetry and self-recovery
+
+Every command, screenshot, link change, board log line and recovery is appended as one JSON line to
+`~/.esp32-agent/telemetry.jsonl` (`diagnostics` shows the latest). Flash with `hardware/flash.sh --log` to
+get the board's own log in there too. The server reconnects on its own after a BLE drop (1 s doubling to
+15 s), and when the board reports an undelivered mouse release (`status.hid.fail` rising) it sends `usbreset`,
+which re-enumerates the device like a re-plug; the pointer re-homes on the next gesture.
 
 ## Limits
 
