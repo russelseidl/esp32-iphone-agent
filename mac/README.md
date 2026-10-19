@@ -52,8 +52,10 @@ use), runs the server from it as a user launchd agent serving MCP over HTTP on `
 | `calibrate_auto` | automatic 3x3 grid calibration (piecewise map per axis); `calibrate_start`/`calibrate_move`/`calibrate_fit` remain as the manual two-point fallback |
 | `find_pointer` | where the pointer is, by nudging it and differencing frames |
 | `tap x y [precise]`, `long_press x y s`, `swipe x1 y1 x2 y2`, `path [[x,y],…]`, `scroll x y n` | gestures, 0-1000 coords; precise finds and corrects the pointer before clicking |
-| `type_text`, `key` | USB keyboard (ASCII; `enter`, `esc`, `backspace`, `cmd+h`, …) |
-| `home`, `back`, `reset_pointer` | Home Screen, back gesture, release + re-home the pointer |
+| `type_text`, `key` | USB keyboard (ASCII; `enter`, `esc`, `backspace`, `cmd+h`, …); `type_text` waits for the on-screen keyboard and undoes iOS's auto-capitalised first letter |
+| `home`, `back`, `app_switcher`, `reset_pointer` | Home flick, back flick (reports whether the screen changed), App Switcher, release + re-home the pointer |
+| `open_app name` | Home → Search → type → Enter, verified by the screen changing; prefer it to hunting icons |
+| `search_in_app text [app]` | Cmd+K / Cmd+F when the app honours it (learned per app), then types |
 | `raw` | any protocol line from `docs/ble-protocol.md` |
 | `diagnostics` | last N telemetry events (commands, frames, link, board log, recoveries) and counters |
 | `usb_reset`, `pace` | re-enumerate the board on the phone; set pointer move pacing |
@@ -78,6 +80,12 @@ Mirroring stops when the phone locks, and iOS suspends the board's USB link at t
 stay unlocked. While idle the server nudges the pointer by one unit every 20 s (`ESP32_AGENT_KEEPAWAKE`, 0 = off)
 so an unlocked phone never idles to the lock screen; it cannot unlock a locked phone. If mirroring stopped,
 `status` says so: choose Control Center → Screen Mirroring → ESP32 Agent again.
+
+## Per-app notes
+
+`~/.esp32-agent/apps.json` records which keyboard shortcuts each app honours (seeded: Slack takes Cmd+K but not
+Cmd+H inside a text field; Muse takes none). `search_in_app` reads and updates it. `screenshot` ends with a
+state line (live/replaying, keyboard up/down, frame age) so a second screenshot is rarely needed.
 
 ## Telemetry and self-recovery
 

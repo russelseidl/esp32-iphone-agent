@@ -467,3 +467,8 @@ Spec coverage (section 3): composite tools with verification (Task 3; app-title 
 **PLAN_SURGICAL:** `mac/screen.py`, `mac/apps.py`, tests, `mac/esp32_agent_mcp.py`, README, spec, this plan.
 **PLAN_VERIFY_COVERAGE:** pytest for Tasks 1-2, compile+pytest+tool count for Task 3, field check with expected outcomes for Task 4, grep for Task 5. No PR.
 **PLAN_TEST_PARITY:** Task 1: keyboard, icons, blank, light theme branches covered. Task 2: unknown, learn/reload, seed, corrupt-file branches covered. Task 3: asyncio/BLE glue — UNTESTED by unit tests, covered by Task 4.
+
+## Field check
+
+Pending: the phone was away when Tasks 1-3 and 5 were completed (2026-10-19 ~14:10). Run Task 4 when it is
+back; the tools are installed and the agent is running.

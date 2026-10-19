@@ -89,9 +89,10 @@ Composite tools, each verifying its outcome from the next frame and returning `o
   duplicated runs; ASCII only.
 - `screenshot` returns the frame plus a state line: `app` (when known), `keyboard` up/down, `live`/`replaying`.
 
-Per-app notes: `~/.esp32-agent/apps.yml`, one entry per app: shortcuts known to work or fail, fixed geometry
-(e.g. Slack tab bar y-range, Control Center's Screen Mirroring tile), and a title signature. The navigator
-reads it; the bench and the navigator write to it when a shortcut is observed to work or fail.
+Per-app notes: `~/.esp32-agent/apps.json` (JSON, no parser dependency), one entry per app: shortcuts known
+to work or fail, and fixed geometry where needed (e.g. Control Center's Screen Mirroring tile). The navigator
+reads it; the bench and the navigator write to it when a shortcut is observed to work or fail. Verification of
+`open_app` is a changed screen plus the caller's screenshot, not a title signature.
 
 ### 4. Bench harness
 
