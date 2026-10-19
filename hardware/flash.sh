@@ -3,6 +3,7 @@
 # Usage: hardware/flash.sh [port] [--debug] [--sta] [--build-only]
 #   --debug       log commands and the AirPlay handshake on USB serial
 #   --sta         test build: join the Wi-Fi in hid_bridge/secrets.h instead of opening a hotspot
+#   --log         send the board log to BLE peers as "log ..." lines (the Mac writes them to telemetry)
 #   --build-only  compile only (prints flash/RAM usage)
 #   --ap-tune     A/B build: hotspot on a 20 MHz channel with 300 TU beacons (more airtime for BLE)
 # BLE host: h2zero NimBLE-Arduino (arduino-cli lib install "NimBLE-Arduino"); its buffer sizes live in
@@ -19,6 +20,7 @@ for a in "$@"; do
     --debug) DEFS+=" -DDEBUG_SERIAL=1" ;;
     --sta) [[ -f hid_bridge/secrets.h ]] || { echo "--sta needs hid_bridge/secrets.h (see secrets.example.h)"; exit 1; }
            DEFS+=" -DSTA_FROM_SECRETS=1" ;;
+    --log) DEFS+=" -DLOG_BLE=1" ;;
     --build-only) BUILD_ONLY=1 ;;
     --ap-tune) DEFS+=" -DAP_TUNE=1" ;;
     *) PORT=$a ;;

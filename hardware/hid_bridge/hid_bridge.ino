@@ -17,6 +17,7 @@
 #include "ble_link.h"
 #include "netcfg.h"
 #include "video_link.h"
+#include "boardlog.h"
 #include "src/airplay/airplay.h"
 
 const int STEP = 10;      // max pointer delta per report while moving
@@ -200,12 +201,6 @@ void statusTask(void *) {
   }
 }
 
-void logLine(const char *msg) {
-#if DEBUG_SERIAL
-  Serial.printf("[%lu] %s\n", millis(), msg);
-#endif
-}
-
 void startAirplay() {
   static airplay_cfg cfg;
   cfg.name = receiverName.c_str();
@@ -216,7 +211,7 @@ void startAirplay() {
   cfg.max_fps = cfg_fps();
   cfg.on_config = video_on_config;
   cfg.on_au = video_on_au;
-  cfg.log = logLine;
+  cfg.log = boardLogLine;
   if (!airplay_start(&cfg)) Serial.println("airplay: start failed");
 }
 
