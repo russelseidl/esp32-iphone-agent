@@ -195,6 +195,9 @@ class Link:
         self.last_cmd_at = 0.0
         self.nudges = 0
         self._keeper = None
+        self._reconnector = None
+        self._recovering = None
+        self.stuck = StuckDetector()
 
     @property
     def connected(self) -> bool:
@@ -244,10 +247,37 @@ class Link:
     def _on_disconnect(self, _):
         log.warning("board disconnected")
         TELEMETRY.event("link", state="disconnected")
+        if self._reconnector is None or self._reconnector.done():
+            self._reconnector = asyncio.get_running_loop().create_task(self._reconnect())
         for fut in self.pending.values():
             if not fut.done():
                 fut.set_exception(RuntimeError("board disconnected"))
         self.pending.clear()
+
+    async def _reconnect(self):
+        """After a drop, try to come back on our own so the stream and keep-awake resume without a tool call."""
+        for delay in backoff(1, 15, 8):
+            await asyncio.sleep(delay)
+            if self.connected:
+                return
+            try:
+                await self.ensure()
+                TELEMETRY.event("recover", action="reconnect", result="ok", after_s=delay)
+                return
+            except Exception as e:
+                TELEMETRY.event("recover", action="reconnect", result=str(e)[:120], after_s=delay)
+        log.warning("gave up reconnecting; the next tool call will try again")
+
+    async def usb_reset(self, why: str) -> str:
+        """Ask the board to re-enumerate (like a re-plug), then re-home the pointer."""
+        TELEMETRY.event("recover", action="usbreset", why=why)
+        try:
+            await self._cmd("usbreset")
+            await asyncio.sleep(3)  # the phone mounts the device again
+            phone._pos = None
+            return "usb reset sent; pointer will re-home on the next gesture"
+        finally:
+            self._recovering = None
 
     def _on_reply(self, _, data: bytearray):
         text = data.decode(errors="replace")
@@ -264,6 +294,9 @@ class Link:
         try:
             self.status = json.loads(data)
             self.status_at = time.monotonic()
+            fail = int(self.status.get("hid", {}).get("fail", 0))
+            if self.stuck.hid(fail) and self._recovering is None:
+                self._recovering = asyncio.get_running_loop().create_task(self.usb_reset("hid.fail rose"))
         except ValueError:
             pass
 
@@ -706,6 +739,23 @@ async def reset_pointer() -> str:
     """Release the mouse button and re-home the pointer in the top-left corner (after a failed gesture)."""
     await phone.reset()
     return _ok("pointer released and homed")
+
+
+@mcp.tool()
+async def usb_reset() -> str:
+    """Re-enumerate the board on the phone (same effect as unplugging it): clears a stuck mouse button, the
+    state where moves no longer show and taps land where a drag ends. The pointer re-homes afterwards."""
+    await link.ensure()
+    return await link.usb_reset("requested")
+
+
+@mcp.tool()
+async def pace(step: int = 10, step_ms: int = 8) -> str:
+    """Pointer move pacing on the board: units per report (1-127) and ms between reports (1-50). Not stored;
+    the bench sweeps it. Changing it invalidates the calibration until you re-run it."""
+    reply = await link.cmd(f"pace {step} {step_ms}")
+    phone._pos = None
+    return f"{reply}: pace {step} units / {step_ms} ms (recalibrate before precise work)"
 
 
 @mcp.tool()
