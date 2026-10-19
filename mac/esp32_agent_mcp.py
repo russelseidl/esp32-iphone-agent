@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["mcp>=2", "bleak>=0.22"]
+# dependencies = ["mcp>=2", "bleak>=0.22", "pillow>=10"]
 # ///
 """ESP32 Agent as an MCP server for Claude on this Mac.
 
@@ -32,6 +32,8 @@ from pathlib import Path
 from bleak import BleakClient, BleakScanner
 from mcp.server.mcpserver import MCPServer, Image
 
+from calibration import Calibration
+from pointer import Frame, changed_fraction, locate
 from telemetry import Telemetry
 from watchdog import StuckDetector, backoff
 
@@ -389,6 +391,53 @@ class Link:
                            "Fastest fix: stop and restart Screen Mirroring on the phone.")
 
 
+# ---- pointer finding (Link methods, bound below) -------------------------------------------------------
+
+NUDGE = 12          # mouse units the pointer is wiggled by to find it
+SETTLE_S = 1.5      # max wait for a still screen
+FRESH_S = 1.2       # max wait for a frame after the nudge
+
+
+async def _settled_frame(self: Link) -> Frame:
+    """A frame taken when two consecutive frames barely differ (the screen is still)."""
+    deadline = time.monotonic() + SETTLE_S
+    prev = Frame.from_jpeg((await self.frame())[0])
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.25)
+        cur = Frame.from_jpeg((await self.frame())[0])
+        if changed_fraction(prev, cur) < 0.002:
+            return cur
+        prev = cur
+    return prev
+
+
+async def _find_pointer(self: Link, near_right_edge: bool = False) -> tuple[float, float] | None:
+    """Where the pointer is now, as screen fractions; None if it could not be told apart from the screen.
+    Nudges right (left near the right edge) and back; the pointer ends where it started."""
+    sign = -1 if near_right_edge else 1
+    before = await self._settled_frame()
+    await self._cmd(f"move {sign * NUDGE} 0")
+    t_sent = time.monotonic()
+    after = None
+    deadline = time.monotonic() + FRESH_S
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.15)
+        if self.decoder.at > t_sent + 0.2:
+            after = Frame.from_jpeg(self.decoder.png)
+            break
+    await self._cmd(f"move {-sign * NUDGE} 0")
+    if after is None:
+        TELEMETRY.event("pointer", found=False, why="no fresh frame after the nudge")
+        return None
+    found = locate(before, after, sign)
+    TELEMETRY.event("pointer", found=found is not None, at=found[0] if found else None)
+    return found[0] if found else None
+
+
+Link._settled_frame = _settled_frame
+Link.find_pointer = _find_pointer
+
+
 def shot(png: bytes, lag: dict):
     """Tool result: the frame, plus a warning when it is a replay rather than the present."""
     img = Image(data=png, format="jpeg")
@@ -416,33 +465,25 @@ class Phone:
 
     def __init__(self, link: Link):
         self.link = link
-        saved = json.loads(CAL_FILE.read_text()) if CAL_FILE.exists() else None
-        # screen fraction = a * mouse units (from the homed corner) + b, per axis; iOS pointer motion has an
-        # offset as well as a scale (the first reports after a stop travel less), so one point is not enough
-        self.cal = None
-        if saved and "ax" in saved:
-            self.cal = saved
-        elif saved and "w" in saved:
-            self.cal = {"ax": 1 / saved["w"], "bx": 0.0, "ay": 1 / saved["h"], "by": 0.0}
+        self.cal = Calibration.from_dict(json.loads(CAL_FILE.read_text()) if CAL_FILE.exists() else None)
         self._pos = None
         self._moves = 0
         self._link = 0
 
     @property
     def calibrated(self) -> bool:
-        return self.cal is not None
+        return self.cal.ready
 
     @property
     def span(self) -> dict | None:
-        """Mouse units across the whole screen (for display)."""
-        return {"w": round(1 / self.cal["ax"]), "h": round(1 / self.cal["ay"])} if self.cal else None
+        return self.cal.span()
 
     def save(self):
         HOME.mkdir(parents=True, exist_ok=True)
-        CAL_FILE.write_text(json.dumps(self.cal))
+        CAL_FILE.write_text(json.dumps(self.cal.to_dict()))
 
     def fit(self, points):
-        """points: [[units_x, units_y, screen_x, screen_y], ...] (screen in 0-1000), 2 or more; least squares."""
+        """Two-point affine fallback: [[units_x, units_y, screen_x, screen_y], ...] (screen 0-1000)."""
         if len(points) < 2:
             raise RuntimeError("need at least 2 points")
         cal = {}
@@ -457,19 +498,16 @@ class Phone:
             cal[b] = mf - cal[a] * mu
             if cal[a] <= 0:
                 raise RuntimeError("calibration points are inconsistent (negative scale)")
-        self.cal = cal
+        self.cal = Calibration.from_dict(cal)
         self.save()
         self._pos = None
         return cal
 
-    def _units(self, t: float, a: str, b: str) -> int:
-        return max(0, round((min(max(t, 0), 1000) / 1000 - self.cal[b]) / self.cal[a]))
-
     def _dx(self, x: float) -> int:
-        return self._units(x, "ax", "bx")
+        return self.cal.units("x", min(max(x, 0), 1000) / 1000)
 
     def _dy(self, y: float) -> int:
-        return self._units(y, "ay", "by")
+        return self.cal.units("y", min(max(y, 0), 1000) / 1000)
 
     async def _move_to(self, tx: int, ty: int, rehome: bool = True):
         if self._link != self.link.links:  # new link: a dropped gesture may have left the button down
@@ -507,8 +545,61 @@ class Phone:
         await asyncio.sleep(0.4)
         await self.reset()
 
-    async def tap(self, x, y):
+    GRID = (0.15, 0.5, 0.85)  # screen fractions the grid aims at (from the current map, or a default span)
+
+    async def calibrate_auto(self) -> dict:
+        """Home, visit a 3x3 grid, find the pointer at each stop, fit the piecewise map for both axes."""
+        res = (int(self.link.status.get("w", 480)), int(self.link.status.get("h", 1040)))
+        guess = self.cal if self.cal.ready else Calibration.from_dict({"w": 269, "h": 618})
+        await self.reset()
+        home = await self.link.find_pointer()
+        if home is None:
+            raise RuntimeError("pointer not found after homing: is AssistiveTouch on and the screen still?")
+        xs = [guess.units("x", f) for f in self.GRID]
+        ys = [guess.units("y", f) for f in self.GRID]
+        seen_x: dict[int, list[float]] = {u: [] for u in xs}
+        seen_y: dict[int, list[float]] = {u: [] for u in ys}
+        missed = 0
+        for uy in ys:
+            for ux in xs:
+                await self._move_to(ux, uy, rehome=False)
+                found = await self.link.find_pointer(near_right_edge=ux == xs[-1])
+                if found is None:
+                    missed += 1
+                    continue
+                seen_x[ux].append(found[0])
+                seen_y[uy].append(found[1])
+        px = [(0, home[0])] + [(u, sum(v) / len(v)) for u, v in seen_x.items() if v]
+        py = [(0, home[1])] + [(u, sum(v) / len(v)) for u, v in seen_y.items() if v]
+        if len(px) < 3 or len(py) < 3:
+            raise RuntimeError(f"only {9 - missed} of 9 grid points found; keep the screen still and retry")
+        self.cal = Calibration()
+        self.cal.fit_grid("x", px, res)
+        self.cal.fit_grid("y", py, res)
+        self.save()
+        await self.reset()
+        TELEMETRY.event("calibrate", res=res, missed=missed, x=px, y=py)
+        return {"res": res, "grid_points_found": 9 - missed, "x": px, "y": py, "span": self.span}
+
+    async def tap(self, x, y, precise: bool = False):
         await self.point(x, y)
+        if precise:
+            found = await self.link.find_pointer(near_right_edge=x > 900)
+            if found is not None:
+                fx, fy = found[0] * 1000, found[1] * 1000
+                miss = ((fx - x) ** 2 + (fy - y) ** 2) ** 0.5
+                TELEMETRY.event("aim", aimed=[x, y], landed=[round(fx), round(fy)], miss=round(miss, 1))
+                self.cal.learn("x", self._pos[0], found[0])
+                self.cal.learn("y", self._pos[1], found[1])
+                self.save()
+                if self.link.stuck.landing((x, y), (fx, fy)) and self.link._recovering is None:
+                    self.link._recovering = asyncio.get_running_loop().create_task(self.link.usb_reset("taps landing far off"))
+                    raise RuntimeError("taps are landing far from their aim; resetting USB, try again in a few seconds")
+                if miss > 8:
+                    dx = self._dx(x) - self._dx(fx)
+                    dy = self._dy(y) - self._dy(fy)
+                    await self.link.cmd(f"move {dx} {dy}")
+                    self._pos = (self._pos[0] + dx, self._pos[1] + dy)
         await self.link.cmd("click")
         await asyncio.sleep(TAP_GAP)
 
@@ -586,7 +677,8 @@ async def status() -> str:
                      "to send one (stop and restart Screen Mirroring on the phone to force a fresh keyframe)")
     return json.dumps({"connected": True, "board": link.name, "status": st, "video": video,
                        "keep_awake": {"every_s": KEEP_AWAKE_S, "nudges": link.nudges},
-                       "calibrated": phone.calibrated, "span": phone.span, "hints": hints})
+                       "calibrated": phone.calibrated, "span": phone.span, "calibration_model": phone.cal.model,
+                       "hints": hints})
 
 
 @mcp.tool()
@@ -654,20 +746,38 @@ async def calibrate_fit(points: list[list[int]]) -> str:
 
 
 @mcp.tool()
+async def calibrate_auto() -> str:
+    """Automatic pointer calibration: homes the pointer, visits a 3x3 grid and finds the pointer at each stop
+    by nudging it and differencing frames, then fits a piecewise map per axis. Needs a still screen (the Home
+    Screen is ideal) and takes about 30 s. Re-run after changing the mirror resolution or pace."""
+    return json.dumps(await phone.calibrate_auto())
+
+
+@mcp.tool()
+async def find_pointer() -> str:
+    """Where the AssistiveTouch pointer is right now (0-1000), found by nudging it 12 units and back and
+    differencing two frames. Returns null if the screen was moving or the pointer could not be seen."""
+    found = await link.find_pointer()
+    return json.dumps(None if found is None else [round(found[0] * 1000), round(found[1] * 1000)])
+
+
+@mcp.tool()
 async def set_calibration(span_w: int, span_h: int) -> str:
     """Set a scale-only calibration: mouse units needed to cross the whole screen width and height (no offset;
     calibrate_fit is more accurate)."""
-    phone.cal = {"ax": 1 / span_w, "bx": 0.0, "ay": 1 / span_h, "by": 0.0}
+    phone.cal = Calibration.from_dict({"ax": 1 / span_w, "bx": 0.0, "ay": 1 / span_h, "by": 0.0})
     phone.save()
     phone._pos = None
     return "saved"
 
 
 @mcp.tool()
-async def tap(x: int, y: int) -> str:
-    """Tap the screen at x, y (0-1000, origin top-left). Aim at the visual center of the element."""
-    await phone.tap(x, y)
-    return _ok(f"tapped {x},{y}")
+async def tap(x: int, y: int, precise: bool = False) -> str:
+    """Tap the screen at x, y (0-1000, origin top-left). Aim at the visual center of the element. precise=true
+    finds the pointer on screen first and corrects the miss before clicking (about 1 s slower): use it for
+    small or tightly packed targets such as tab bars, list rows, toggles, icons under 60 units."""
+    await phone.tap(x, y, precise)
+    return _ok(f"tapped {x},{y}" + (" (precise)" if precise else ""))
 
 
 @mcp.tool()

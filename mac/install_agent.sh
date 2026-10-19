@@ -60,7 +60,7 @@ EOF
 codesign --force --sign - "$APP" >/dev/null 2>&1
 
 # 2. python deps next to the script (the bundled interpreter finds its stdlib through PYTHONHOME)
-uv pip install --quiet --python "$PYROOT/bin/python3.13" --target "$DEPS" --upgrade "mcp>=2" "bleak>=0.22"
+uv pip install --quiet --python "$PYROOT/bin/python3.13" --target "$DEPS" --upgrade "mcp>=2" "bleak>=0.22" "pillow>=10"
 
 # 3. the launchd agent
 unload
