@@ -47,6 +47,10 @@ SCAN_TIMEOUT = float(os.environ.get("ESP32_AGENT_SCAN", "15"))
 KEEP_AWAKE_S = float(os.environ.get("ESP32_AGENT_KEEPAWAKE", "20"))  # idle seconds between pointer nudges; 0 = off
 
 REHOME_EVERY = 10       # gestures between re-homing (cancels drift of the relative pointer)
+# Re-homing: a paced move far past the top-left corner (iOS clamps the pointer there). The board's `home`
+# command fires 50 unpaced (-127,-127) reports 2 ms apart, and iOS 26 was seen dropping most of them (with
+# the on-screen keyboard up), which left every following tap starting from the wrong place.
+HOME_CMD = "move -3000 -3000"
 HOLD = 0.25             # rest before lifting a swipe, so iOS adds no momentum
 TAP_GAP = 0.15          # stay still after a click, so iOS sees a tap and not the start of a drag
 
@@ -430,7 +434,7 @@ class Phone:
             await self.link.cmd("release")
             self._pos, self._link = None, self.link.links
         if self._pos is None or (rehome and self._moves >= REHOME_EVERY):
-            await self.link.cmd("home")
+            await self.link.cmd(HOME_CMD)
             self._pos, self._moves = (0, 0), 0
         x, y = self._pos
         self._pos = None
@@ -445,8 +449,21 @@ class Phone:
     async def reset(self):
         self._pos = None
         await self.link.cmd("release")
-        await self.link.cmd("home")
+        await self.link.cmd(HOME_CMD)
         self._pos, self._moves = (0, 0), 0
+
+    async def edge_home(self):
+        """The iOS Home gesture from the bottom edge, independent of calibration: pin the pointer to the bottom,
+        press, flick up, release; then re-home the tracker."""
+        await self.link.cmd("release")
+        await self.link.cmd("move 0 1500")  # paced; iOS clamps the pointer at the edge
+        await self.link.cmd("press")
+        try:
+            await self.link.cmd("move 0 -450")
+        finally:
+            await self.link.cmd("release")
+        await asyncio.sleep(0.4)
+        await self.reset()
 
     async def tap(self, x, y):
         await self.point(x, y)
@@ -647,9 +664,10 @@ async def key(combo: str) -> str:
 
 @mcp.tool()
 async def home() -> str:
-    """Go to the iOS Home Screen (Cmd+H on the USB keyboard; the consumer-control Home key is ignored by iOS 26)."""
-    await link.cmd("key cmd+h")
-    await phone.reset()
+    """Go to the iOS Home Screen: the pointer is pushed hard against the bottom edge (so no calibration error can
+    miss the home indicator) and flicked up. (Cmd+H works in some apps but not all; iOS 26 ignores the
+    consumer-control Home key.)"""
+    await phone.edge_home()
     return _ok("home")
 
 
@@ -670,7 +688,10 @@ async def reset_pointer() -> str:
 @mcp.tool()
 async def raw(command: str) -> str:
     """Send one raw protocol line to the board (docs/ble-protocol.md): ping, move DX DY, click, scroll V H,
-    res W H, fps N, coex bt|balance|wifi, unpair, ... Returns the board's reply."""
+    res W H, fps N, coex bt|balance|wifi, unpair, ... Returns the board's reply. A raw move/home/press leaves
+    the tracked pointer position unknown, so the next gesture re-homes first."""
+    if command.split(" ", 1)[0] in ("move", "home", "press", "release"):
+        phone._pos = None
     return await link.cmd(command, timeout=120)
 
 
