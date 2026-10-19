@@ -22,6 +22,7 @@ def keyboard(d, w, h):
         for k in range(10):
             x = int(w * (0.02 + k * 0.096))
             d.rounded_rectangle((x, y, x + int(w * 0.08), y + int(h * 0.045)), radius=4, fill=(80, 80, 86))
+            d.rectangle((x + int(w * 0.03), y + int(h * 0.012), x + int(w * 0.05), y + int(h * 0.033)), fill=(230, 230, 230))  # glyph
 
 
 def home_icons(d, w, h):
@@ -66,4 +67,5 @@ def test_light_theme_keyboard():
             for k in range(10):
                 x = int(w * (0.02 + k * 0.096))
                 d.rounded_rectangle((x, y, x + int(w * 0.08), y + int(h * 0.045)), radius=4, fill=(255, 255, 255))
+                d.rectangle((x + int(w * 0.03), y + int(h * 0.012), x + int(w * 0.05), y + int(h * 0.033)), fill=(30, 30, 30))
     assert keyboard_visible(make(light, bg=(245, 245, 247))) is True

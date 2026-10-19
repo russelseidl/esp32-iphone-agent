@@ -7,35 +7,45 @@ text give fewer and irregular ones. Works for both themes because it counts tran
 from pointer import Frame
 
 KEY_ROWS = (0.70, 0.763)      # scanlines through the first two key rows (iOS keyboard, portrait)
-GAP_ROW = 0.731               # the gap between them: almost no edges on a keyboard, many on text
-MIN_TRANSITIONS = 14
-MAX_SPACING_CV = 0.45         # coefficient of variation of the key pitch
-PITCH_RANGE = (0.06, 0.14)    # key pitch as a share of the width (ten keys per row)
-MAX_GAP_TRANSITIONS = 6
+GAP_ROW = 0.731               # the gap between them: nearly flat on a keyboard, busy on text
+PITCH_RANGE = (0.07, 0.13)    # key pitch as a share of the width (ten keys per row)
+MIN_PERIODICITY = 0.35        # normalised autocorrelation at the key pitch (real keyboards measure 0.44-0.47)
+GAP_VARIANCE_RATIO = 0.35     # the gap row's variance relative to the key rows'
 
 
-def _transitions(frame: Frame, y_frac: float, threshold: int = 22) -> list[int]:
+def _row(frame: Frame, y_frac: float) -> list[float]:
     y = min(frame.h - 1, int(y_frac * frame.h))
-    row = frame.gray[y * frame.w:(y + 1) * frame.w]
-    xs = []
     x0, x1 = int(frame.w * 0.02), int(frame.w * 0.98)
-    for x in range(x0 + 1, x1):
-        if abs(row[x] - row[x - 1]) > threshold:
-            if not xs or x - xs[-1] > 2:  # one transition per edge
-                xs.append(x)
-    return xs
+    row = frame.gray[y * frame.w + x0:y * frame.w + x1]
+    mean = sum(row) / len(row)
+    return [v - mean for v in row]
 
 
-def _key_row(frame: Frame, y: float) -> bool:
-    xs = _transitions(frame, y)
-    if len(xs) < MIN_TRANSITIONS:
-        return False
-    pitches = [b - a for a, b in zip(xs, xs[2:])]  # key pitch: every second edge (key width + gap)
-    mean = sum(pitches) / len(pitches)
-    cv = (sum((g - mean) ** 2 for g in pitches) / len(pitches)) ** 0.5 / mean
-    return cv <= MAX_SPACING_CV and PITCH_RANGE[0] <= mean / frame.w <= PITCH_RANGE[1]
+def _variance(row: list[float]) -> float:
+    return sum(v * v for v in row) / len(row)
+
+
+def _periodicity(row: list[float], w: int) -> tuple[float, float]:
+    """Best normalised autocorrelation over key-pitch lags, and that lag as a share of the width."""
+    var = _variance(row)
+    if var < 1:
+        return 0.0, 0.0
+    n = len(row)
+    best, best_lag = 0.0, 0
+    for lag in range(int(PITCH_RANGE[0] * w), int(PITCH_RANGE[1] * w) + 1):
+        c = sum(row[i] * row[i + lag] for i in range(n - lag)) / ((n - lag) * var)
+        if c > best:
+            best, best_lag = c, lag
+    return best, best_lag / w
 
 
 def keyboard_visible(frame: Frame) -> bool:
-    """Two key rows with ten-key pitch and an empty gap row between them; text lines fail the gap test."""
-    return all(_key_row(frame, y) for y in KEY_ROWS) and len(_transitions(frame, GAP_ROW)) <= MAX_GAP_TRANSITIONS
+    """Two key rows whose brightness repeats at the ten-key pitch, with a nearly flat gap row between them.
+    Letter glyphs inside keys do not break the periodicity; lines of text have no flat gap row."""
+    rows = [_row(frame, y) for y in KEY_ROWS]
+    for r in rows:
+        corr, _ = _periodicity(r, frame.w)
+        if corr < MIN_PERIODICITY:
+            return False
+    key_var = min(_variance(r) for r in rows)
+    return _variance(_row(frame, GAP_ROW)) <= GAP_VARIANCE_RATIO * key_var
