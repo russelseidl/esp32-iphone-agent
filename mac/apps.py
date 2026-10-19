@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 SEED = {
-    "slack": {"shortcuts": {"cmd+k": True, "cmd+h": False}},
+    "slack": {"shortcuts": {"cmd+h": False}},
     "muse": {"shortcuts": {"cmd+h": False, "cmd+space": False}},
     "messages": {"shortcuts": {"cmd+h": True}},
     "home": {"shortcuts": {"cmd+space": True, "cmd+h": True}},

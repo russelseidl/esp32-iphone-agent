@@ -460,15 +460,20 @@ async def _find_pointer(self: Link, near_right_edge: bool = False) -> tuple[floa
     return found[1] if found else None
 
 
-async def _frame_changed(self: Link, before: Frame, wait_s: float = 2.5, min_change: float = 0.25) -> bool:
-    """Did at least min_change of the screen change relative to `before` within wait_s? Polls fresh frames."""
+async def _frame_changed(self: Link, before: Frame, wait_s: float = 2.5, min_change: float = 0.25) -> bool | None:
+    """Did at least min_change of the screen change relative to `before` within wait_s? Compares only live
+    frames; None when no live frame arrived in time (the mirror was replaying), i.e. unverified."""
     deadline = time.monotonic() + wait_s
+    seen_live = False
     while time.monotonic() < deadline:
         await asyncio.sleep(0.3)
         png, lag = await self.frame(timeout=1.5)
+        if not lag["live"]:
+            continue
+        seen_live = True
         if changed_fraction(before, Frame.from_jpeg(png)) >= min_change:
             return True
-    return False
+    return False if seen_live else None
 
 
 async def _keyboard_up(self: Link, wait_s: float = 2.0) -> bool:
@@ -946,6 +951,8 @@ async def back() -> str:
     await phone.edge_back()
     ok = await link.frame_changed(before)
     TELEMETRY.event("nav", action="back", ok=ok)
+    if ok is None:
+        return "back sent, unverified (the mirror was replaying); take a screenshot"
     return _ok("back") if ok else "no effect: the screen did not change (not every screen has a back gesture)"
 
 
@@ -956,6 +963,8 @@ async def app_switcher() -> str:
     await phone.app_switcher()
     ok = await link.frame_changed(before)
     TELEMETRY.event("nav", action="app_switcher", ok=ok)
+    if ok is None:
+        return "app switcher sent, unverified (the mirror was replaying); take a screenshot"
     return _ok("app switcher") if ok else "no effect: the screen did not change"
 
 
@@ -965,7 +974,7 @@ async def open_app(name: str) -> str:
     changed from the Home Screen. Use this instead of hunting for icons."""
     await phone.edge_home()
     await asyncio.sleep(0.8)
-    home_frame = Frame.from_jpeg((await link.frame(timeout=2))[0])
+    home_frame = await link._settled_frame()
     await link.cmd("key cmd+space")
     if not await link.keyboard_up(2.5):
         TELEMETRY.event("nav", action="open_app", name=name, ok=False, why="search did not open")
@@ -977,6 +986,8 @@ async def open_app(name: str) -> str:
     ok = await link.frame_changed(home_frame, wait_s=3)
     TELEMETRY.event("nav", action="open_app", name=name, ok=ok)
     phone._pos = None
+    if ok is None:
+        return f"'{name}' sent to Search, unverified (the mirror was replaying); take a screenshot"
     return _ok(f"opened {name} (verify with a screenshot that it is the right app)") if ok else \
         f"no effect: nothing opened for '{name}' (no such app, or Search picked nothing)"
 

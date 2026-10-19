@@ -6,9 +6,12 @@ text give fewer and irregular ones. Works for both themes because it counts tran
 """
 from pointer import Frame
 
-ROW_Y = (0.70, 0.715, 0.73)   # scanlines through the top key row (the keyboard starts near y = 0.67)
+KEY_ROWS = (0.70, 0.763)      # scanlines through the first two key rows (iOS keyboard, portrait)
+GAP_ROW = 0.731               # the gap between them: almost no edges on a keyboard, many on text
 MIN_TRANSITIONS = 14
-MAX_SPACING_CV = 0.45         # coefficient of variation of the gaps between transitions
+MAX_SPACING_CV = 0.45         # coefficient of variation of the key pitch
+PITCH_RANGE = (0.06, 0.14)    # key pitch as a share of the width (ten keys per row)
+MAX_GAP_TRANSITIONS = 6
 
 
 def _transitions(frame: Frame, y_frac: float, threshold: int = 22) -> list[int]:
@@ -23,14 +26,16 @@ def _transitions(frame: Frame, y_frac: float, threshold: int = 22) -> list[int]:
     return xs
 
 
+def _key_row(frame: Frame, y: float) -> bool:
+    xs = _transitions(frame, y)
+    if len(xs) < MIN_TRANSITIONS:
+        return False
+    pitches = [b - a for a, b in zip(xs, xs[2:])]  # key pitch: every second edge (key width + gap)
+    mean = sum(pitches) / len(pitches)
+    cv = (sum((g - mean) ** 2 for g in pitches) / len(pitches)) ** 0.5 / mean
+    return cv <= MAX_SPACING_CV and PITCH_RANGE[0] <= mean / frame.w <= PITCH_RANGE[1]
+
+
 def keyboard_visible(frame: Frame) -> bool:
-    for y in ROW_Y:
-        xs = _transitions(frame, y)
-        if len(xs) < MIN_TRANSITIONS:
-            continue
-        pitches = [b - a for a, b in zip(xs, xs[2:])]  # key pitch: every second edge (key width + gap)
-        mean = sum(pitches) / len(pitches)
-        cv = (sum((g - mean) ** 2 for g in pitches) / len(pitches)) ** 0.5 / mean
-        if cv <= MAX_SPACING_CV:
-            return True
-    return False
+    """Two key rows with ten-key pitch and an empty gap row between them; text lines fail the gap test."""
+    return all(_key_row(frame, y) for y in KEY_ROWS) and len(_transitions(frame, GAP_ROW)) <= MAX_GAP_TRANSITIONS

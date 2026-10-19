@@ -21,13 +21,13 @@ def test_learn_persists_and_reloads(tmp_path: Path):
 def test_seed_notes_are_present(tmp_path: Path):
     n = AppNotes(tmp_path / "apps.json")
     assert n.shortcut("muse", "cmd+h") is False  # seeded from today's observations
-    assert n.shortcut("slack", "cmd+k") is True
+    assert n.shortcut("slack", "cmd+h") is False and n.shortcut("slack", "cmd+k") is None
 
 
 def test_corrupt_file_starts_empty(tmp_path: Path):
     p = tmp_path / "apps.json"
     p.write_text("{not json")
     n = AppNotes(p)
-    assert n.shortcut("slack", "cmd+k") is True  # seeds still apply
+    assert n.shortcut("slack", "cmd+h") is False  # seeds still apply
     n.learn("x", "cmd+f", True)
     assert AppNotes(p).shortcut("x", "cmd+f") is True
