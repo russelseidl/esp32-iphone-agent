@@ -28,9 +28,9 @@ def keyboard_visible(frame: Frame) -> bool:
         xs = _transitions(frame, y)
         if len(xs) < MIN_TRANSITIONS:
             continue
-        gaps = [b - a for a, b in zip(xs, xs[1:])]
-        mean = sum(gaps) / len(gaps)
-        cv = (sum((g - mean) ** 2 for g in gaps) / len(gaps)) ** 0.5 / mean
+        pitches = [b - a for a, b in zip(xs, xs[2:])]  # key pitch: every second edge (key width + gap)
+        mean = sum(pitches) / len(pitches)
+        cv = (sum((g - mean) ** 2 for g in pitches) / len(pitches)) ** 0.5 / mean
         if cv <= MAX_SPACING_CV:
             return True
     return False
