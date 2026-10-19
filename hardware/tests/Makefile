@@ -2,7 +2,7 @@
 SRC = ../hid_bridge/src
 CFLAGS = -std=c11 -Wall -Wextra -g -fsanitize=address,undefined
 
-test: test_main.c $(SRC)/bplist/bplist.c $(SRC)/video/gop.c
+test: test_main.c $(SRC)/bplist/bplist.c $(SRC)/video/gop.c $(SRC)/hid/hidretry.c
 	$(CC) $(CFLAGS) -o $@ $^
 	./test
 

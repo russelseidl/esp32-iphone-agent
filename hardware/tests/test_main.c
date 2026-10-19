@@ -173,11 +173,40 @@ static void test_chunker(void) {
   CHECK(vchunk_next(&c, out, 20, 1) == 0);
 }
 
+#include "../hid_bridge/src/hid/hidretry.h"
+
+static int fake_calls, fake_ok_at, fake_waits;
+static bool fake_send(void *ctx) { (void)ctx; fake_calls++; return fake_calls >= fake_ok_at; }
+static void fake_wait(int ms) { (void)ms; fake_waits++; }
+
+static void test_hidretry(void) {
+  fake_calls = 0; fake_ok_at = 1; fake_waits = 0;
+  CHECK(hid_send_confirmed(fake_send, NULL, 5, 20, fake_wait) == 0);  // first try ok: 0 retries, no wait
+  CHECK(fake_calls == 1 && fake_waits == 0);
+  fake_calls = 0; fake_ok_at = 3; fake_waits = 0;
+  CHECK(hid_send_confirmed(fake_send, NULL, 5, 20, fake_wait) == 2);  // ok on the 3rd try: 2 retries
+  CHECK(fake_calls == 3 && fake_waits == 2);
+  fake_calls = 0; fake_ok_at = 99; fake_waits = 0;
+  CHECK(hid_send_confirmed(fake_send, NULL, 5, 20, fake_wait) == -1);  // never: gives up after 5
+  CHECK(fake_calls == 5 && fake_waits == 4);
+
+  CHECK(pace_valid(10, 8) && pace_valid(1, 1) && pace_valid(127, 50));
+  CHECK(!pace_valid(0, 8) && !pace_valid(128, 8) && !pace_valid(10, 0) && !pace_valid(10, 51));
+
+  ratelimit rl;
+  ratelimit_init(&rl, 3, 1000);          // 3 per second
+  CHECK(ratelimit_take(&rl, 0) && ratelimit_take(&rl, 10) && ratelimit_take(&rl, 20));
+  CHECK(!ratelimit_take(&rl, 30) && rl.dropped == 1);
+  CHECK(!ratelimit_take(&rl, 999) && rl.dropped == 2);
+  CHECK(ratelimit_take(&rl, 1000) && rl.dropped == 2);  // window rolled: allowed again
+}
+
 int main(void) {
   test_bplist_roundtrip();
   test_bplist_utf16();
   test_gop();
   test_chunker();
+  test_hidretry();
   printf(fails ? "%d FAILED\n" : "all tests passed\n", fails);
   return fails != 0;
 }
