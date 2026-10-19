@@ -402,6 +402,10 @@ async def _settled_frame(self: Link) -> Frame:
     """A frame taken when two consecutive frames barely differ (the screen is still)."""
     deadline = time.monotonic() + SETTLE_S
     png, lag = await self.frame()
+    live_deadline = time.monotonic() + 6  # a screen change bursts frames; the link catches up in a few seconds
+    while not lag["live"] and lag["mirroring"] and time.monotonic() < live_deadline:
+        await asyncio.sleep(0.5)
+        png, lag = await self.frame(timeout=2)
     if not lag["live"]:
         raise RuntimeError("the mirror is not live (replaying or stopped); try again in a moment")
     prev = Frame.from_jpeg(png)
@@ -562,12 +566,14 @@ class Phone:
         press, flick up, release; then re-home the tracker."""
         await self.link.cmd("release")
         await self.link.cmd("move 0 1500")  # paced; iOS clamps the pointer at the edge
+        await self.link.cmd("pace 25 4")    # a fast flick: a slow drag that ends still reads as the App Switcher
         await self.link.cmd("press")
         try:
-            await self.link.cmd("move 0 -450")
+            await self.link.cmd("move 0 -300")
         finally:
             await self.link.cmd("release")
-        await asyncio.sleep(0.4)
+            await self.link.cmd("pace 10 8")
+        await asyncio.sleep(0.6)
         await self.reset()
 
     GRID = (0.15, 0.5, 0.85)  # screen fractions the grid aims at (from the current map, or a default span)
