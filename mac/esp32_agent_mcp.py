@@ -65,7 +65,11 @@ REHOME_EVERY = 10       # gestures between re-homing (cancels drift of the relat
 # rests on that arc where the push direction is normal to it. A steep diagonal (-600 -1200) parked it at the
 # top of the arc, 15% in from the left edge, so nothing left of that was reachable with positive units; the
 # x-dominant push parks it on the left edge just below the arc (measured 4 of 4 at (3, 108) px). ~1 s paced.
-HOME_CMD = "move -1200 -600"
+HOME_CMD = "move -4800 -2400"  # sent at pace 40/4 (0.5 s): long enough to clamp at any tracking speed (measured
+# 2026-10-19: at the minimum tracking speed the screen is ~1100 x 2400 units at step 10, ~4x more than at the
+# default speed; the gain grows with the step size, 0.64/0.88/1.7 px per unit at steps 10/20/80, and does not
+# depend on the report interval)
+HOME_PACE = "40 4"
 # bench 2026-10-19 (three runs, 5 taps per setting): 10/4 is ~30% faster per step than the firmware default
 # 10/8 (1.85 s vs 2.6 s) with the same error band (15-22 vs 13-19 units) and no drops; 20/8 is as fast but
 # misses more (29-37 units); 5/8 is slower and no more accurate. Sent at connect and after every flick.
@@ -491,15 +495,15 @@ async def _fresh_frame(self: Link, after_board_ms: int, wait_s: float = FRESH_S)
     return None
 
 
-async def _find_pointer(self: Link, near_right_edge: bool = False) -> tuple[float, float] | None:
+async def _find_pointer(self: Link, near_right_edge: bool = False, nudge: int = NUDGE) -> tuple[float, float] | None:
     """Where the pointer is now, as screen fractions; None if it could not be told apart from the screen.
     iOS hides an idle pointer, so: nudge out (it shows and moves), capture, nudge back, capture; the two
     footprints between those frames give the position, the one opposite the second nudge being the current."""
     sign = -1 if near_right_edge else 1
     await self._settled_frame()  # live and still
-    await self._cmd(f"move {sign * NUDGE} 0")
+    await self._cmd(f"move {sign * nudge} 0")
     out = await self._fresh_frame(self.board_now())
-    await self._cmd(f"move {-sign * NUDGE} 0")
+    await self._cmd(f"move {-sign * nudge} 0")
     back = await self._fresh_frame(self.board_now())
     if out is None or back is None:
         TELEMETRY.event("pointer", found=False, why="no fresh frame after a nudge")
@@ -634,12 +638,31 @@ class Phone:
     def _dy(self, y: float) -> int:
         return self.cal.units("y", min(max(y, 0), 1000) / 1000)
 
+    def span_units(self) -> tuple[int, int]:
+        """Mouse units across the whole screen (width, height) by the current map; a default before calibration.
+        Gestures, nudges and dabs are sized from this so they survive a change of tracking speed."""
+        if not self.calibrated:
+            return 270, 620
+        return (max(60, round((self.cal.units("x", 0.9) - self.cal.units("x", 0.1)) / 0.8)),
+                max(120, round((self.cal.units("y", 0.9) - self.cal.units("y", 0.1)) / 0.8)))
+
+    def nudge_units(self) -> int:
+        return max(12, round(0.1 * self.span_units()[0]))  # ~10% of the width: clearly a different blob
+
+    async def home(self):
+        """Park the pointer on the left edge below the rounded corner, the origin of every tap."""
+        await self.link.cmd(f"pace {HOME_PACE}")
+        try:
+            await self.link.cmd(HOME_CMD)
+        finally:
+            await self.link.cmd(f"pace {DEFAULT_PACE}")
+
     async def _move_to(self, tx: int, ty: int, rehome: bool = True):
         if self._link != self.link.links:  # new link: a dropped gesture may have left the button down
             await self.link.cmd("release")
             self._pos, self._link = None, self.link.links
         if self._pos is None or (rehome and self._moves >= REHOME_EVERY):
-            await self.link.cmd(HOME_CMD)
+            await self.home()
             self._pos, self._moves = (0, 0), 0
         x, y = self._pos
         self._pos = None
@@ -653,25 +676,27 @@ class Phone:
         if not self.calibrated:
             raise RuntimeError("pointer not calibrated: run calibrate_auto")
         await self.link.cmd("release")
-        await self.link.cmd(HOME_CMD)
+        await self.home()
         self._pos, self._moves = (0, 0), 0
         await self._move_to(self._dx(x), self._dy(y), rehome=False)
 
     async def reset(self):
         self._pos = None
         await self.link.cmd("release")
-        await self.link.cmd(HOME_CMD)
+        await self.home()
         self._pos, self._moves = (0, 0), 0
 
     async def edge_home(self):
         """The iOS Home gesture from the bottom edge, independent of calibration: pin the pointer to the bottom,
         press, flick up, release; then re-home the tracker."""
+        w, h = self.span_units()
         await self.link.cmd("release")
-        await self.link.cmd("move 0 1500")  # paced; iOS clamps the pointer at the edge
+        await self.link.cmd(f"pace {HOME_PACE}")
+        await self.link.cmd(f"move 0 {3 * h}")  # paced; iOS clamps the pointer at the edge
         await self.link.cmd("pace 25 4")    # a fast flick: a slow drag that ends still reads as the App Switcher
         await self.link.cmd("press")
         try:
-            await self.link.cmd("move 0 -300")
+            await self.link.cmd(f"move 0 -{round(0.45 * h)}")
         finally:
             await self.link.cmd("release")
             await self.link.cmd(f"pace {DEFAULT_PACE}")
@@ -680,12 +705,14 @@ class Phone:
 
     async def edge_back(self):
         """iOS back: a flick from the pinned left edge rightwards."""
+        w, h = self.span_units()
         await self.link.cmd("release")
-        await self.link.cmd("move -1500 0")
+        await self.link.cmd(f"pace {HOME_PACE}")
+        await self.link.cmd(f"move -{3 * w} 0")
         await self.link.cmd("pace 25 4")
         await self.link.cmd("press")
         try:
-            await self.link.cmd("move 300 0")
+            await self.link.cmd(f"move {round(0.45 * w)} 0")
         finally:
             await self.link.cmd("release")
             await self.link.cmd(f"pace {DEFAULT_PACE}")
@@ -693,11 +720,14 @@ class Phone:
 
     async def app_switcher(self):
         """Drag up from the bottom edge and hold before releasing: the App Switcher."""
+        w, h = self.span_units()
         await self.link.cmd("release")
-        await self.link.cmd("move 0 1500")
+        await self.link.cmd(f"pace {HOME_PACE}")
+        await self.link.cmd(f"move 0 {3 * h}")
+        await self.link.cmd(f"pace {DEFAULT_PACE}")
         await self.link.cmd("press")
         try:
-            await self.link.cmd("move 0 -300")
+            await self.link.cmd(f"move 0 -{round(0.45 * h)}")
             await asyncio.sleep(0.5)
         finally:
             await self.link.cmd("release")
@@ -721,7 +751,7 @@ class Phone:
         res = (int(self.link.status.get("w", 480)), int(self.link.status.get("h", 1040)))
         guess = self.cal if self.cal.ready else Calibration.from_dict({"w": 269, "h": 618})
         await self.reset()
-        home = await self.link.find_pointer()
+        home = await self.link.find_pointer(nudge=self.nudge_units())
         if home is None:
             raise RuntimeError("pointer not found after homing: is AssistiveTouch on and the screen still?")
         # the guess only picks where to probe; the probes must be distinct positive moves (the old map can
@@ -733,10 +763,10 @@ class Phone:
         missed = 0
         for uy in ys:
             for ux in xs:
-                await self.link.cmd(HOME_CMD)  # each stop is one move from the corner, exactly like a tap
+                await self.home()  # each stop is one move from the corner, exactly like a tap
                 self._pos = (0, 0)
                 await self._move_to(ux, uy, rehome=False)
-                found = await self.link.find_pointer(near_right_edge=ux == xs[-1])
+                found = await self.link.find_pointer(near_right_edge=ux == xs[-1], nudge=self.nudge_units())
                 if found is None:
                     missed += 1
                     continue
@@ -767,7 +797,7 @@ class Phone:
         is mostly swallowed by iOS pointer acceleration; measured 2026-10-19)."""
         await self.point(x, y)
         if precise:
-            found = await self.link.find_pointer(near_right_edge=x > 900)
+            found = await self.link.find_pointer(near_right_edge=x > 900, nudge=self.nudge_units())
             if found is not None:
                 fx, fy = found[0] * 1000, found[1] * 1000
                 miss = ((fx - x) ** 2 + (fy - y) ** 2) ** 0.5
@@ -786,8 +816,12 @@ class Phone:
         if dab:
             await self.link.cmd("press")
             try:
-                await self.link.cmd("move 8 8")
-                await self.link.cmd("move -8 -8")
+                # a ~3%-of-width stroke centred on the aim: the bench reads the mark's centroid, and a stroke
+                # that starts at the aim puts it half a stroke away (about 10 units of bias)
+                d = max(4, round(0.03 * self.span_units()[0]))
+                await self.link.cmd(f"move {d // 2} {d // 2}")
+                await self.link.cmd(f"move -{d} -{d}")
+                await self.link.cmd(f"move {d // 2} {d // 2}")
             finally:
                 await self.link.cmd("release")
         else:
@@ -952,7 +986,7 @@ async def calibrate_auto() -> str:
 async def find_pointer() -> str:
     """Where the AssistiveTouch pointer is right now (0-1000), found by nudging it 12 units and back and
     differencing two frames. Returns null if the screen was moving or the pointer could not be seen."""
-    found = await link.find_pointer()
+    found = await link.find_pointer(nudge=phone.nudge_units())
     return json.dumps(None if found is None else [round(found[0] * 1000), round(found[1] * 1000)])
 
 
