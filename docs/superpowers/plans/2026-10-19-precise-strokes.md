@@ -110,3 +110,23 @@ its predicted position after 200-300 reports (about 1% accumulated model error).
 ## Field results, absolute route
 
 Pending the flash.
+
+## Final numbers, relative route, 2026-10-19 18:45
+
+`stroke_bench` all shapes at 2 px per report (mirror px, 718 wide; Freeform pen):
+
+| shape | centre-line dev | p95 ink | coverage | pointer end vs target | vs predicted | reports | s |
+|---|---|---|---|---|---|---|---|
+| line | 0.46 | 2.0 | 1.000 | 1.7 | 0.2 | 85 | 2.8 |
+| diag | 1.03 | 2.8 | 1.000 | 1.6 | 0.2 | 128 | 4.1 |
+| square | 0.85 | 3.0 | 0.997 | closed | - | 340 | 10.8 |
+| circle | 0.68 | 2.6 | 1.000 | closed | - | 262 | 8.4 |
+| zigzag | 1.11 | 2.9 | 0.998 | 1.1 | 0.7 | 305 | 9.8 |
+| signature | 1.26 | 2.9 | 1.000 | 1.8 | 1.0 | 200 | 6.5 |
+
+`bench ["aim"]`: plain 17.0 units; precise 3.7 units by the ink mark, **1.0 unit** by the pointer's own
+second look (0.1% of the screen, under a mirror pixel). Precise taps take 5.9 s (two looks); performance is
+the next pass, starting with the `rtrace` batch (flash pending) and a single look when the first lands.
+
+Remaining: flash `hardware/flash.sh --log --abs` (board on the Mac), then the absolute route's field check
+(Task 6): `calibrate_auto`, `bench ["aim"]`, `stroke_bench`, gestures, `open_app`.
