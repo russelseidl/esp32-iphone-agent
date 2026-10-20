@@ -2,7 +2,7 @@ import io
 
 from PIL import Image, ImageDraw
 
-from pointer import Frame, changed_fraction, locate
+from pointer import Frame, changed_fraction, locate, refine
 
 
 def frame(w=240, h=520, pointer=None, bg=(40, 90, 160), extra=None) -> Frame:
@@ -75,3 +75,14 @@ def test_locate_ignores_the_status_bar():
     assert locate(a, b, nudge_sign=+1) is None
     a, b = frame(pointer=(100, 200)), frame(pointer=(120, 200))
     assert locate(a, b, nudge_sign=+1) is not None
+
+
+def test_refine_reads_the_blob_centre_at_full_resolution():
+    # frame() returns half-resolution Frames with the full JPEG attached; the pointer is drawn at (100, 200)
+    # in a 240 x 520 image: refine must find it to within a pixel from locate's coarse answer
+    a, b = frame(pointer=(100, 200)), frame(pointer=(120, 200))
+    (ox, oy), (nx, ny) = locate(a, b, nudge_sign=+1)
+    fine = refine(a.jpeg, b.jpeg, (nx, ny), other=(ox, oy))
+    assert fine is not None
+    assert abs(fine[0] * 240 - 120) < 1.0 and abs(fine[1] * 520 - 200) < 1.0
+    assert refine(a.jpeg, a.jpeg, (nx, ny), other=(ox, oy)) is None  # nothing changed: no blob

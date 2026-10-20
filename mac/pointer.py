@@ -9,7 +9,7 @@ wide after scaling) and this runs once per precise tap.
 import io
 from dataclasses import dataclass
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 DIFF_THRESHOLD = 28     # grey levels; JPEG noise stays well under this on a still screen
 MIN_PIXELS = 12         # smaller changed sets are noise
@@ -101,3 +101,29 @@ def locate(a: Frame, b: Frame, nudge_sign: int,
     return (lc, rc) if nudge_sign > 0 else (rc, lc)
 
 
+
+
+def refine(jpeg_a: bytes, jpeg_b: bytes, centre: tuple[float, float], other: tuple[float, float] | None = None,
+           win: int = 36, threshold: int = DIFF_THRESHOLD) -> tuple[float, float] | None:
+    """Sub-pixel centre of the blob that appears in `jpeg_b` but not in `jpeg_a` near `centre` (fractions),
+    read at the frames' full resolution. `locate` works on half-resolution frames (about 2 px quantisation);
+    this recomputes the centroid of the changed pixels inside a window of +-`win` full-res px around its
+    answer. None when the window holds no change (the blob was not there after all)."""
+    a = Image.open(io.BytesIO(jpeg_a)).convert("L")
+    b = Image.open(io.BytesIO(jpeg_b)).convert("L")
+    w, h = b.size
+    cx, cy = centre[0] * w, centre[1] * h
+    box = (max(0, int(cx - win)), max(0, int(cy - win)), min(w, int(cx + win)), min(h, int(cy + win)))
+    if box[2] - box[0] < 4 or box[3] - box[1] < 4:
+        return None
+    diff = ImageChops.difference(a.crop(box), b.crop(box)).point(lambda v: 255 if v > threshold else 0)
+    pts = [(i % diff.width, i // diff.width) for i, v in enumerate(diff.getdata()) if v]
+    if other is not None:  # the blob's previous footprint also changed: keep the pixels nearer the new centre
+        ox, oy = other[0] * w - box[0], other[1] * h - box[1]
+        ncx, ncy = cx - box[0], cy - box[1]
+        pts = [(x, y) for x, y in pts if (x - ncx) ** 2 + (y - ncy) ** 2 < (x - ox) ** 2 + (y - oy) ** 2]
+    if len(pts) < MIN_PIXELS:
+        return None
+    mx = sum(x for x, _ in pts) / len(pts) + box[0] + 0.5
+    my = sum(y for _, y in pts) / len(pts) + box[1] + 0.5
+    return mx / w, my / h

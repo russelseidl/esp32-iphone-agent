@@ -57,6 +57,7 @@ class Trial:
     latency_ms: float         # command round trip plus wait for a fresh frame
     drops: int = 0            # BLE video drops during the trial
     calibrated: bool = False  # the pointer map was refitted for this setting before the taps (res, pace)
+    pointer_err: float | None = None  # precise taps: the pointer's miss on its last look, before the click (units)
 
     def row(self) -> dict:
         return {"kind": "trial", **asdict(self)}
@@ -66,7 +67,9 @@ def summarize(trials: list[Trial]) -> dict:
     out: dict = {}
     for t in trials:
         s = out.setdefault(t.axis, {}).setdefault(t.setting, {"errors": [], "latencies": [], "drops": 0, "misses": 0,
-                                                              "calibrated": t.calibrated})
+                                                              "calibrated": t.calibrated, "pointer_errs": []})
+        if t.pointer_err is not None:
+            s["pointer_errs"].append(t.pointer_err)
         if t.error is None:
             s["misses"] += 1
         else:
@@ -77,6 +80,8 @@ def summarize(trials: list[Trial]) -> dict:
         for s in axis.values():
             s["n"] = len(s["latencies"])
             s["error_mean"] = round(mean(s["errors"]), 1) if s["errors"] else None
+            s["pointer_err_mean"] = round(mean(s["pointer_errs"]), 1) if s["pointer_errs"] else None
+            del s["pointer_errs"]
             lat = sorted(s["latencies"])
             s["latency_p50"] = median(lat)
             s["latency_p95"] = lat[min(len(lat) - 1, int(0.95 * len(lat)))]
@@ -104,12 +109,12 @@ def pick_winners(summary: dict) -> dict:
 
 
 def to_markdown(summary: dict, winners: dict) -> str:
-    lines = ["| axis | setting | n | error mean (units) | misses | latency p50 / p95 (ms) | drops | calibrated | result |",
-             "|---|---|---|---|---|---|---|---|---|"]
+    lines = ["| axis | setting | n | error mean (units) | pointer err (units) | misses | latency p50 / p95 (ms) | drops | calibrated | result |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for axis, settings in summary.items():
         for name, s in settings.items():
             tag = f"winner ({winners[axis]['by']})" if winners[axis]["winner"] == name else ""
-            lines.append(f"| {axis} | {name} | {s['n']} | {s['error_mean']} | {s['misses']} | "
+            lines.append(f"| {axis} | {name} | {s['n']} | {s['error_mean']} | {s.get('pointer_err_mean')} | {s['misses']} | "
                          f"{s['latency_p50']:.0f} / {s['latency_p95']:.0f} | {s['drops']} | "
                          f"{'yes' if s.get('calibrated') else 'no'} | {tag} |")
     return "\n".join(lines) + "\n"

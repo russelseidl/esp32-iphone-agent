@@ -37,7 +37,7 @@ from absmap import ABS_MAX, AbsMap, fit as fit_abs
 from apps import AppNotes
 from bench import Trial, find_dots, match_dots, pick_winners, summarize, to_markdown
 from calibration import Calibration
-from pointer import Frame, changed_fraction, locate
+from pointer import Frame, changed_fraction, locate, refine
 from screen import keyboard_visible
 from spool import Spool
 from stroke import Curve, ink_pixels, plan_path, score as stroke_score
@@ -502,7 +502,8 @@ async def _fresh_frame(self: Link, after_board_ms: int, wait_s: float = FRESH_S)
     return None
 
 
-async def _find_pointer(self: Link, near_right_edge: bool = False, nudge: int = NUDGE) -> tuple[float, float] | None:
+async def _find_pointer(self: Link, near_right_edge: bool = False, nudge: int = NUDGE,
+                        _retry: bool = True) -> tuple[float, float] | None:
     """Where the pointer is now, as screen fractions; None if it could not be told apart from the screen.
     iOS hides an idle pointer, so: nudge out (it shows and moves), capture, nudge back, capture; the two
     footprints between those frames give the position, the one opposite the second nudge being the current."""
@@ -516,6 +517,23 @@ async def _find_pointer(self: Link, near_right_edge: bool = False, nudge: int = 
         TELEMETRY.event("pointer", found=False, why="no fresh frame after a nudge")
         return None
     found = locate(out, back, -sign)  # out -> back moved by -sign
+    moved = changed_fraction(out, back)
+    if found is None and moved < 0.0003 and self.lag()["live"]:
+        # nothing at all changed between the nudges on a live mirror: iOS has stopped taking mouse moves (seen
+        # twice today, buttons still working; a USB re-enumeration cures it). Reset once and look again.
+        self.dead_finds = getattr(self, "dead_finds", 0) + 1
+        if self.dead_finds >= 2 and _retry and self._recovering is None:
+            self.dead_finds = 0
+            TELEMETRY.event("recover", action="usbreset", why="pointer did not move on two nudges")
+            await self.usb_reset("pointer did not move")
+            await asyncio.sleep(4)
+            return await self._find_pointer(near_right_edge, nudge, _retry=False)
+    elif found is not None:
+        self.dead_finds = 0
+    if found is not None:  # full-resolution centroid of the current blob: about 0.5 px instead of 2
+        fine = refine(out.jpeg, back.jpeg, found[1], other=found[0])
+        if fine is not None and abs(fine[0] - found[1][0]) < 0.01 and abs(fine[1] - found[1][1]) < 0.01:
+            found = (found[0], fine)
     TELEMETRY.event("pointer", found=found is not None, at=found[1] if found else None,
                     changed=round(changed_fraction(out, back), 4))
     if found is None:  # keep the pair for inspection (last 20 misses)
@@ -938,33 +956,36 @@ class Phone:
         if self.abs_mode:
             return await self.abs_tap(x, y, precise, dab)
         await self.point(x, y)
-        if precise:
+        self.last_miss = None  # precise: the pointer's miss on its last look (units), the verified accuracy
+        for attempt in range(2 if precise else 0):  # look, correct; look again if the first correction missed
             found = await self.link.find_pointer(near_right_edge=x > 900, nudge=self.nudge_units())
             if found is not None:
                 fx, fy = found[0] * 1000, found[1] * 1000
                 miss = ((fx - x) ** 2 + (fy - y) ** 2) ** 0.5
+                self.last_miss = round(miss, 1)
                 TELEMETRY.event("aim", aimed=[x, y], landed=[round(fx), round(fy)], miss=round(miss, 1))
-                if miss < 100:  # a landing far off is a finder error or a stuck button, not the map (one bad
-                    self.cal.learn("x", self._pos[0], found[0])  # reading once pulled the map 40 units)
-                    self.cal.learn("y", self._pos[1], found[1])
+                if miss < 100 and self._pos is not None:  # the first look only, and never from a landing far
+                    self.cal.learn("x", self._pos[0], found[0])  # off (a finder error or a stuck button; one bad
+                    self.cal.learn("y", self._pos[1], found[1])  # reading once pulled the map 40 units)
                     self.save()
                 if self.link.stuck.landing((x, y), (fx, fy)) and self.link._recovering is None:
                     self.link._recovering = asyncio.get_running_loop().create_task(self.link.usb_reset("taps landing far off"))
                     raise RuntimeError("taps are landing far from their aim; resetting USB, try again in a few seconds")
-                if miss > 8:
-                    if CURVE_FILE.exists():
-                        # planned reports through the measured curve: the correction itself is then exact to
-                        # about a pixel, where a paced move is only as good as the piecewise map
-                        W, H = _frame_px()
-                        plan = plan_path([(fx / 1000 * W, fy / 1000 * H), (x / 1000 * W, y / 1000 * H)],
-                                         _load_curve(), px_per_report=4.0, origin=(fx / 1000 * W, fy / 1000 * H))
-                        await _send_reports(plan.reports)
-                        self._pos = None
-                    else:
-                        dx = self._dx(x) - self._dx(fx)
-                        dy = self._dy(y) - self._dy(fy)
-                        await self.link.cmd(f"move {dx} {dy}")
-                        self._pos = (self._pos[0] + dx, self._pos[1] + dy)
+                if miss <= 8:
+                    break  # close enough: the finder itself is good to about 2 units
+                if CURVE_FILE.exists():
+                    # planned reports through the measured curve: the correction itself is then exact to
+                    # about a pixel, where a paced move is only as good as the piecewise map
+                    W, H = _frame_px()
+                    plan = plan_path([(fx / 1000 * W, fy / 1000 * H), (x / 1000 * W, y / 1000 * H)],
+                                     _load_curve(), px_per_report=4.0, origin=(fx / 1000 * W, fy / 1000 * H))
+                    await _send_reports(plan.reports)
+                    self._pos = None
+                elif self._pos is not None:
+                    dx = self._dx(x) - self._dx(fx)
+                    dy = self._dy(y) - self._dy(fy)
+                    await self.link.cmd(f"move {dx} {dy}")
+                    self._pos = (self._pos[0] + dx, self._pos[1] + dy)
         if dab:
             await self.link.cmd("press")
             try:
@@ -1420,19 +1441,21 @@ async def bench(axes: list[str] = ["aim", "pace", "coex"], taps_per_setting: int
                 before = await _clean_canvas()
                 drops0 = int(link.status.get("ble", {}).get("drop", 0))
                 lat = []
+                perr = []
                 for (x, y) in BENCH_PLAN[:taps_per_setting]:
                     t0 = time.monotonic()
                     await phone.tap(x, y, precise=(value == "precise") if axis == "aim" else False, dab=True)
                     await link._fresh_frame(link.board_now())
                     lat.append((time.monotonic() - t0) * 1000)
+                    perr.append(getattr(phone, "last_miss", None))
                 after = Frame.from_jpeg((await link.frame())[0])
                 found = find_dots(after) or []
                 known = find_dots(before) or []
                 new = [d for d in found if all(abs(d[0] - k[0]) + abs(d[1] - k[1]) > 20 for k in known)]
                 errors = match_dots(BENCH_PLAN[:taps_per_setting], new)
                 drops = int(link.status.get("ble", {}).get("drop", 0)) - drops0
-                for e, l in zip(errors, lat):
-                    tr = Trial(axis, value, e, round(l), drops, calibrated)
+                for e, l, pe in zip(errors, lat, perr):
+                    tr = Trial(axis, value, e, round(l), drops, calibrated, pe)
                     trials.append(tr)
                     TELEMETRY.event(**tr.row())
                 for _ in range(taps_per_setting):
@@ -1541,6 +1564,11 @@ async def _draw_px(path_px: list[tuple[float, float]], px_per_report: float) -> 
     if found is None:
         raise RuntimeError("pointer not found at the stroke's start (is the screen still?)")
     origin = (found[0] * W, found[1] * H)
+    start_miss = math.dist(origin, path_px[0])
+    if start_miss > 1.5:  # walk onto the path's start with the button up, so the stroke has no approach hook
+        approach = plan_path([origin, path_px[0]], curve, px_per_report=4.0, origin=origin)
+        await _send_reports(approach.reports)
+        origin = approach.end
     plan = plan_path(path_px, curve, px_per_report=px_per_report, max_step=127, origin=origin)
     t0 = time.monotonic()
     await link.cmd("press")
@@ -1550,7 +1578,7 @@ async def _draw_px(path_px: list[tuple[float, float]], px_per_report: float) -> 
         await link.cmd("release")
     phone._pos = None
     return {"reports": len(plan.reports), "seconds": round(time.monotonic() - t0, 1), "origin_px": [round(v, 1) for v in origin],
-            "start_miss_px": round(math.dist(origin, path_px[0]), 1), "predicted_end_px": [round(v, 1) for v in plan.end],
+            "start_miss_px": round(start_miss, 1), "predicted_end_px": [round(v, 1) for v in plan.end],
             "target_end_px": [round(v, 1) for v in path_px[-1]]}
 
 

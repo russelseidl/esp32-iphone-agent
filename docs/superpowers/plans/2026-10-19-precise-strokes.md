@@ -64,6 +64,21 @@ its predicted position after 200-300 reports (about 1% accumulated model error).
 - [x] A finder misread (the clock ticking over at 18:01) had been fed to the map's learn step and pulled it 40
   units; learning now ignores landings over 100 units off, and the finder ignores the status bar.
 
+### Task 4c: Verified taps, sub-pixel finder, signature (done)
+
+- [x] The finder refines its answer at full resolution (`pointer.refine`: centroid of the changed pixels in
+  a window around the half-resolution blob, old footprint excluded); precise taps look twice (look, correct
+  with planned reports, look again): the second look reads the pointer 0.3-2.4 units (mean 1.3, about 1 px)
+  from the aim on all five targets. The ink-based bench error (4 units) is the dab mark's own noise, so the
+  bench now also reports the pointer's verified miss.
+- [x] Strokes approach the path start with the button up before pressing (no approach hook).
+- [x] Signature "Andy", six strokes, 578 reports, 37 s with one `move` per report (rtrace pending flash):
+  every stroke ends within 0.5-1.6 px of its target; the remaining wobble is the hand-made control points and
+  Freeform's smoothing. Frame: mac/.signature.png (not committed).
+- [x] Dead-mouse incident 18:32: moves ignored, buttons alive, right after an agent restart and the 8192-AU
+  compaction (which worked: "compacted, 1 AUs kept", no crash). Cure: `usbreset`. The finder now resets USB
+  on its own when two consecutive looks see no change at all on a live mirror, and retries.
+
 ### Task 5: Absolute pointer firmware (built, not flashed)
 
 - [x] `hardware/flash.sh --abs` -> `-DPOINTER_ABS=1`: `USBHIDAbsoluteMouse`, commands `abs X Y`,

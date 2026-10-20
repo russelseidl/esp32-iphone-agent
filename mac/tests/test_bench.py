@@ -59,3 +59,6 @@ def test_summarize_and_pick_winners():
     md = to_markdown(s, w)
     assert "| res |" in md and "360x780" in md
     assert "| 1450 / 1500 | 1 | yes |" in md and "| 2000 / 2100 | 0 | no |" in md
+    t = Trial("aim", "precise", error=4.0, latency_ms=5000, pointer_err=1.2)
+    s3 = summarize([t, Trial("aim", "precise", error=3.0, latency_ms=5000, pointer_err=0.8)])
+    assert s3["aim"]["precise"]["pointer_err_mean"] == 1.0
