@@ -130,3 +130,34 @@ the next pass, starting with the `rtrace` batch (flash pending) and a single loo
 
 Remaining: flash `hardware/flash.sh --log --abs` (board on the Mac), then the absolute route's field check
 (Task 6): `calibrate_auto`, `bench ["aim"]`, `stroke_bench`, gestures, `open_app`.
+
+## Field results, absolute route, 2026-10-19 18:52-18:58
+
+Flashed `hardware/flash.sh --log --abs`; status `ptr: abs`. iOS places the AssistiveTouch pointer where the
+report says: `abs 8192 8192` -> (250, 250), `abs 24575 24575` -> (749, 750), exactly the device range.
+`calibrate_auto` (abs fit, 9 of 9): ax 3.075e-5, bx -0.0033, ay 3.053e-5, by 0.0003, residual 0.00115 of the
+screen (under a mirror pixel). `open_app freeform` worked through the absolute Home flick, Cmd+Space and typing.
+
+`bench ["aim"]`:
+
+| setting | ink error (units) | pointer verified (units) | latency p50 / p95 (ms) |
+|---|---|---|---|
+| plain | 4.7 | 1.1 | 977 / 1200 |
+| precise | 4.5 | 1.1 | 2938 / 3130 |
+
+A plain absolute tap is as accurate as a corrected one (the first look already reads 0.5 units) and takes
+1.0 s instead of 1.9 s (relative plain) or 5.9 s (relative precise). Precise mode is no longer needed here.
+
+`stroke_bench` at 2 px per report (`trace` batches, 4 ms per report):
+
+| shape | centre-line dev | coverage | pointer end vs target | reports | s (relative route) |
+|---|---|---|---|---|---|
+| line | 0.55 | 1.000 | 1.3 | 150 | 0.8 (2.8) |
+| diag | 1.14 | 1.000 | 1.6 | 212 | 1.2 (4.1) |
+| square | 0.88 | 0.995 | closed | 600 | 3.6 (10.8) |
+| circle | 1.05 | 1.000 | closed | 432 | 2.8 (8.4) |
+| zigzag | 1.15 | 0.991 | 2.4 | 558 | 3.1 (9.8) |
+| signature | 1.30 | 1.000 | 1.8 | 337 | 1.8 (6.5) |
+
+Same fidelity as the planned relative strokes, 3-5x faster, no acceleration model involved. The residual
+~1 px is the mirror's resolution plus Freeform's smoothing.

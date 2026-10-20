@@ -691,13 +691,15 @@ class Phone:
         self._pos = None
 
     async def abs_edge_gesture(self, start, end, hold_s: float = 0.0):
-        """press at an edge, flick to `end` quickly, release (Home, Back, App Switcher)."""
+        """press at an edge, flick to `end` quickly, release (Home, Back). With `hold_s` the drag is slow
+        (about 0.3 s) and pauses before the release, which iOS reads as the App Switcher, not Home."""
         await self.link.cmd("release")
         await self.abs_point(*start)
         await asyncio.sleep(0.15)
         await self.link.cmd("press")
         try:
-            await self.abs_trace(self._abs_line(start[0], start[1], end[0], end[1], step_units=25.0), dt_ms=2)
+            pts = self._abs_line(start[0], start[1], end[0], end[1], step_units=25.0 if not hold_s else 10.0)
+            await self.abs_trace(pts, dt_ms=2 if not hold_s else 8)
             if hold_s:
                 await asyncio.sleep(hold_s)
         finally:

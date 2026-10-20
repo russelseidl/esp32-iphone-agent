@@ -36,7 +36,7 @@ Circle, zigzag, signature: centre line within 2 px, the pointer itself 3-4 px fr
 Limits: dead reckoning accumulates the residual model error; the app's smoothing is outside our control;
 a stroke of 300 reports takes 10-20 s over BLE (a batch command would fix the time, not the drift).
 
-## Approach B: absolute pointing (next)
+## Approach B: absolute pointing (built and field-checked: the default from now on)
 
 A USB HID mouse collection with absolute X/Y (TinyUSB `TUD_HID_REPORT_DESC_ABSMOUSE`, logical 0..32767,
 `USBHIDAbsoluteMouse` in arduino-esp32 3.x) is reported to place the AssistiveTouch pointer directly at
@@ -44,13 +44,16 @@ the commanded position on iPhone (fork jinwon-int/esp32-iphone-agent, PR 19: 0.8
 latency, portrait only). If it holds on this phone, taps and strokes become coordinates: no acceleration,
 no Home move, no dead reckoning, and a stroke is the path's points sent as absolute reports.
 
-Firmware: a second HID device `absMouse` next to the relative mouse; commands `abs X Y` (0-32767),
-`apress`, `arelease`, `aclick`, `atrace N x1 y1 ... xN yN` (held button, one report per point, paced).
-Mac: `calibrate_abs` (a 3x3 grid of absolute positions read back with the pointer finder; affine fit),
-`tap_abs`, `draw_abs`; the stroke bench gets a `mode` so both approaches are scored the same way.
+Firmware: a compile-time build (`flash.sh --abs`; the core's HID composite allows one mouse report ID, so
+the two mouse types cannot coexist): `abs X Y` (0-32767), `trace DT x y ...` (held button, one report per
+point, paced), `rtrace` (relative batches), `move` emulated at 45 abs units per unit, status `ptr`.
+Mac: `Phone.abs_mode` from status; `calibrate_abs` (a 3x3 grid of absolute positions read back with the
+pointer finder; affine fit) behind `calibrate_auto`; every gesture, tap, drag and stroke branches on the
+mode, so the tools and benches are unchanged.
 
-Risks: iOS version acceptance (one report); the iPhone landscape pointer bug (portrait only); whether the
-pointer's rounded-corner constraint applies to absolute positions too. All measured by the same bench.
+Measured 2026-10-19 on this phone (iOS 26): accepted; the map is the device range to 0.1%; plain taps verify
+at 1.1 units in 1.0 s; strokes 0.5-1.3 px centre line, 3-5x faster than the planned relative route.
+Remaining caveat: portrait only (the iPhone landscape pointer bug).
 
 ## Verification
 
