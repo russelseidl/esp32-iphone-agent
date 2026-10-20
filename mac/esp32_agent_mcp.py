@@ -706,7 +706,18 @@ class Phone:
     GRID = (0.15, 0.5, 0.85)  # screen fractions the grid aims at (from the current map, or a default span)
 
     async def calibrate_auto(self) -> dict:
-        """Home, visit a 3x3 grid, find the pointer at each stop, fit the piecewise map for both axes."""
+        """Home, visit a 3x3 grid, find the pointer at each stop, fit the piecewise map for both axes. The grid
+        is aimed with the previous map; when that map was for another pace or home it lands short of the far
+        edge (measured: 0.75 instead of 0.85), so a second pass with the new map runs when coverage is short."""
+        result = await self._calibrate_pass()
+        far = min(self.cal.knots["x"][-1][1], self.cal.knots["y"][-1][1])
+        if far < 0.8:
+            log.info("calibration reached only %.2f of the screen; second pass", far)
+            result = await self._calibrate_pass()
+            result["passes"] = 2
+        return result
+
+    async def _calibrate_pass(self) -> dict:
         res = (int(self.link.status.get("w", 480)), int(self.link.status.get("h", 1040)))
         guess = self.cal if self.cal.ready else Calibration.from_dict({"w": 269, "h": 618})
         await self.reset()
@@ -1161,17 +1172,20 @@ BENCH_AXES = {
     "res":  ["480 1040", "360 780", "718 1560"],
     "fps":  ["5", "3", "8"],
     "coex": ["balance", "bt", "wifi"],
-    "pace": ["10 8", "5 8", "10 4", "20 8"],
+    "pace": [DEFAULT_PACE, "10 8", "5 8", "20 8"],  # first = baseline, restored (and recalibrated) at the end
     "aim":  ["plain", "precise"],
 }
 BENCH_PLAN = [(300, 250), (700, 250), (500, 500), (300, 750), (700, 750)]  # five taps per setting
 
 
-async def _apply_setting(axis: str, value: str) -> None:
+async def _apply_setting(axis: str, value: str) -> bool:
+    """Returns whether the pointer map was refitted for the setting (res and pace both change it)."""
     if axis in ("res", "fps", "coex", "pace"):
         await link.cmd(f"{axis} {value}")
     if axis in ("res", "pace"):
-        await phone.calibrate_auto()  # the pointer map depends on both
+        await phone.calibrate_auto()
+        return True
+    return False
 
 
 async def _clean_canvas() -> Frame:
@@ -1205,7 +1219,7 @@ async def bench(axes: list[str] = ["aim", "pace", "coex"], taps_per_setting: int
     try:
         for axis in axes:
             for value in BENCH_AXES[axis]:
-                await _apply_setting(axis, value)
+                calibrated = await _apply_setting(axis, value)
                 before = await _clean_canvas()
                 drops0 = int(link.status.get("ble", {}).get("drop", 0))
                 lat = []
@@ -1221,7 +1235,7 @@ async def bench(axes: list[str] = ["aim", "pace", "coex"], taps_per_setting: int
                 errors = match_dots(BENCH_PLAN[:taps_per_setting], new)
                 drops = int(link.status.get("ble", {}).get("drop", 0)) - drops0
                 for e, l in zip(errors, lat):
-                    tr = Trial(axis, value, e, round(l), drops)
+                    tr = Trial(axis, value, e, round(l), drops, calibrated)
                     trials.append(tr)
                     TELEMETRY.event(**tr.row())
                 for _ in range(taps_per_setting):

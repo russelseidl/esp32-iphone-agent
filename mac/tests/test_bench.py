@@ -47,7 +47,10 @@ def test_summarize_and_pick_winners():
               Trial("res", "360x780", error=13, latency_ms=1400, drops=1),
               Trial("fps", "5", error=11, latency_ms=2000, drops=0),
               Trial("fps", "8", error=None, latency_ms=2600, drops=0)]
+    trials[2:4] = [Trial("res", "360x780", error=14, latency_ms=1500, drops=0, calibrated=True),
+                   Trial("res", "360x780", error=13, latency_ms=1400, drops=1, calibrated=True)]
     s = summarize(trials)
+    assert s["res"]["360x780"]["calibrated"] is True and s["res"]["480x1040"]["calibrated"] is False
     assert s["res"]["480x1040"]["error_mean"] == 11 and s["res"]["360x780"]["latency_p50"] == 1450
     assert s["fps"]["8"]["error_mean"] is None and s["fps"]["8"]["misses"] == 1
     w = pick_winners(s)
@@ -55,3 +58,4 @@ def test_summarize_and_pick_winners():
     assert w["fps"]["winner"] == "5" and w["fps"]["by"] == "baseline"
     md = to_markdown(s, w)
     assert "| res |" in md and "360x780" in md
+    assert "| 1450 / 1500 | 1 | yes |" in md and "| 2000 / 2100 | 0 | no |" in md
