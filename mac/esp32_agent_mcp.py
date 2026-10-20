@@ -739,19 +739,26 @@ class Phone:
         """Home, visit a 3x3 grid, find the pointer at each stop, fit the piecewise map for both axes. The grid
         is aimed with the previous map; when that map was for another pace or home it lands short of the far
         edge (measured: 0.75 instead of 0.85), so a second pass with the new map runs when coverage is short."""
-        result = await self._calibrate_pass()
+        default = Calibration.from_dict({"w": 269, "h": 618})
+        try:
+            result = await self._calibrate_pass(self.cal if self.cal.ready else default, self.nudge_units())
+        except (RuntimeError, ValueError) as e:
+            # a map from another tracking speed aims the probes (and the finder's nudge) up to 4x off:
+            # the pointer is lost or clamps at the edges. Start over from the default span.
+            log.warning("calibration with the stored map failed (%s); retrying from the default span", e)
+            result = await self._calibrate_pass(default, NUDGE)
+            result["fallback"] = True
         far = min(self.cal.knots["x"][-1][1], self.cal.knots["y"][-1][1])
         if far < 0.8:
             log.info("calibration reached only %.2f of the screen; second pass", far)
-            result = await self._calibrate_pass()
+            result = await self._calibrate_pass(self.cal, self.nudge_units())
             result["passes"] = 2
         return result
 
-    async def _calibrate_pass(self) -> dict:
+    async def _calibrate_pass(self, guess: Calibration, nudge: int) -> dict:
         res = (int(self.link.status.get("w", 480)), int(self.link.status.get("h", 1040)))
-        guess = self.cal if self.cal.ready else Calibration.from_dict({"w": 269, "h": 618})
         await self.reset()
-        home = await self.link.find_pointer(nudge=self.nudge_units())
+        home = await self.link.find_pointer(nudge=nudge)
         if home is None:
             raise RuntimeError("pointer not found after homing: is AssistiveTouch on and the screen still?")
         # the guess only picks where to probe; the probes must be distinct positive moves (the old map can
@@ -766,7 +773,7 @@ class Phone:
                 await self.home()  # each stop is one move from the corner, exactly like a tap
                 self._pos = (0, 0)
                 await self._move_to(ux, uy, rehome=False)
-                found = await self.link.find_pointer(near_right_edge=ux == xs[-1], nudge=self.nudge_units())
+                found = await self.link.find_pointer(near_right_edge=ux == xs[-1], nudge=nudge)
                 if found is None:
                     missed += 1
                     continue
