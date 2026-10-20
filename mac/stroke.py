@@ -72,10 +72,12 @@ class Plan:
 
 
 def _travel(curve: Curve, dx: int, dy: int) -> tuple[float, float]:
-    """Predicted px travel of one report: the gain is set by the vector magnitude and scales both axes."""
+    """Predicted px travel of one report: the gain is set by the vector magnitude, floored to an integer as
+    Apple's IOHIDFamily does (velocity = floor(sqrt(dx^2 + dy^2))), and scales both axes. Measured: a (2,2)
+    report travels 3.53 px per axis, the step-2 gain, not the interpolated gain at 2.83."""
     if dx == 0 and dy == 0:
         return 0.0, 0.0
-    mag = math.hypot(dx, dy)
+    mag = math.floor(math.hypot(dx, dy))
     g = curve.gain(mag)
     return dx * g, dy * g
 
@@ -142,7 +144,7 @@ def _best_report(curve: Curve, need: tuple[float, float], max_step: int) -> tupl
         for cy in (math.floor(by), math.ceil(by)):
             cx2 = max(-max_step, min(max_step, cx))
             cy2 = max(-max_step, min(max_step, cy))
-            if math.hypot(cx2, cy2) < DEAD_ZONE:
+            if math.floor(math.hypot(cx2, cy2)) < DEAD_ZONE:
                 continue
             mx, my = _travel(curve, cx2, cy2)
             e = math.hypot(mx - nx, my - ny)

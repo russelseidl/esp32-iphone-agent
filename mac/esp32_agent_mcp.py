@@ -229,6 +229,7 @@ class Link:
         self._reconnector = None
         self._recovering = None
         self.stuck = StuckDetector()
+        self.caps: dict[str, bool] = {}  # firmware commands found missing at run time (rtrace on old builds)
 
     @property
     def connected(self) -> bool:
@@ -943,17 +944,27 @@ class Phone:
                 fx, fy = found[0] * 1000, found[1] * 1000
                 miss = ((fx - x) ** 2 + (fy - y) ** 2) ** 0.5
                 TELEMETRY.event("aim", aimed=[x, y], landed=[round(fx), round(fy)], miss=round(miss, 1))
-                self.cal.learn("x", self._pos[0], found[0])
-                self.cal.learn("y", self._pos[1], found[1])
-                self.save()
+                if miss < 100:  # a landing far off is a finder error or a stuck button, not the map (one bad
+                    self.cal.learn("x", self._pos[0], found[0])  # reading once pulled the map 40 units)
+                    self.cal.learn("y", self._pos[1], found[1])
+                    self.save()
                 if self.link.stuck.landing((x, y), (fx, fy)) and self.link._recovering is None:
                     self.link._recovering = asyncio.get_running_loop().create_task(self.link.usb_reset("taps landing far off"))
                     raise RuntimeError("taps are landing far from their aim; resetting USB, try again in a few seconds")
                 if miss > 8:
-                    dx = self._dx(x) - self._dx(fx)
-                    dy = self._dy(y) - self._dy(fy)
-                    await self.link.cmd(f"move {dx} {dy}")
-                    self._pos = (self._pos[0] + dx, self._pos[1] + dy)
+                    if CURVE_FILE.exists():
+                        # planned reports through the measured curve: the correction itself is then exact to
+                        # about a pixel, where a paced move is only as good as the piecewise map
+                        W, H = _frame_px()
+                        plan = plan_path([(fx / 1000 * W, fy / 1000 * H), (x / 1000 * W, y / 1000 * H)],
+                                         _load_curve(), px_per_report=4.0, origin=(fx / 1000 * W, fy / 1000 * H))
+                        await _send_reports(plan.reports)
+                        self._pos = None
+                    else:
+                        dx = self._dx(x) - self._dx(fx)
+                        dy = self._dy(y) - self._dy(fy)
+                        await self.link.cmd(f"move {dx} {dy}")
+                        self._pos = (self._pos[0] + dx, self._pos[1] + dy)
         if dab:
             await self.link.cmd("press")
             try:
@@ -1494,6 +1505,30 @@ async def measure_curve(steps: str = "2,3,4,6,8,10,13,16,20,25,32,40,50,64,80,10
     return json.dumps({"curve": curve.points, "rows": rows, "file": str(CURVE_FILE)})
 
 
+async def _send_reports(reports: list[tuple[int, int]], dt_ms: int = 4) -> None:
+    """One HID report per (dx, dy): batched through `rtrace` when the firmware has it (about 60 per command),
+    else one `move` per report at pace 127 (about 60 ms each over BLE)."""
+    if not reports:
+        return
+    if link.caps.get("rtrace", True):
+        try:
+            for i in range(0, len(reports), 60):
+                chunk = reports[i:i + 60]
+                await link.cmd(f"rtrace {dt_ms} " + " ".join(f"{dx} {dy}" for dx, dy in chunk))
+            return
+        except RuntimeError as e:
+            if "unknown" not in str(e):
+                raise
+            link.caps["rtrace"] = False
+            log.warning("firmware without rtrace: sending one move per report")
+    await link.cmd("pace 127 1")
+    try:
+        for dx, dy in reports:
+            await link.cmd(f"move {dx} {dy}")
+    finally:
+        await link.cmd(f"pace {DEFAULT_PACE}")
+
+
 async def _draw_px(path_px: list[tuple[float, float]], px_per_report: float) -> dict:
     """Point at the path's start (verified), then press and trace the planned reports, one per report."""
     W, H = _frame_px()
@@ -1507,15 +1542,12 @@ async def _draw_px(path_px: list[tuple[float, float]], px_per_report: float) -> 
         raise RuntimeError("pointer not found at the stroke's start (is the screen still?)")
     origin = (found[0] * W, found[1] * H)
     plan = plan_path(path_px, curve, px_per_report=px_per_report, max_step=127, origin=origin)
-    await link.cmd("pace 127 1")  # every `move` below is exactly one HID report
     t0 = time.monotonic()
     await link.cmd("press")
     try:
-        for dx, dy in plan.reports:
-            await link.cmd(f"move {dx} {dy}")
+        await _send_reports(plan.reports)
     finally:
         await link.cmd("release")
-        await link.cmd(f"pace {DEFAULT_PACE}")
     phone._pos = None
     return {"reports": len(plan.reports), "seconds": round(time.monotonic() - t0, 1), "origin_px": [round(v, 1) for v in origin],
             "start_miss_px": round(math.dist(origin, path_px[0]), 1), "predicted_end_px": [round(v, 1) for v in plan.end],
@@ -1604,7 +1636,9 @@ async def stroke_bench(shapes: list[str] = ["line", "diag", "square", "circle", 
         was = set(ink_pixels(before.gray, W, H, box=box))
         ink = [p for p in ink_pixels(after.gray, W, H, box=box) if p not in was]
         sc = stroke_score(ink, path)
-        end = await link.find_pointer(nudge=phone.nudge_units())  # the pointer's own closure error, app-independent
+        # the pointer's own closure error, app-independent; not for closed shapes, where the pointer ends on its
+        # own ink and the finder's blob pairing is disturbed (measured 5-8 px there vs 0.4-0.7 on open paths)
+        end = await link.find_pointer(nudge=phone.nudge_units()) if math.dist(path[0], path[-1]) > 20 else None
         sc["pointer_end_miss_px"] = round(math.dist((end[0] * W, end[1] * H), path[-1]), 1) if end else None
         sc["pointer_vs_predicted_px"] = round(math.dist((end[0] * W, end[1] * H), r["predicted_end_px"]), 1) if end else None
         stamp = time.strftime("%H%M%S")

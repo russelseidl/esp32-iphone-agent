@@ -160,6 +160,29 @@ String run(const String &line) {
     return "err abs needs the absolute build (flash.sh --abs)";
 #endif
   }
+  if (cmd == "rtrace") {  // rtrace DT_MS dx1 dy1 dx2 dy2 ...: one relative report per pair (|d| <= 127), DT_MS apart
+    const char *p = arg.c_str();
+    char *end;
+    long dt = strtol(p, &end, 10);
+    if (end == p || dt < 0 || dt > 50) return "err usage: rtrace DT_MS(0-50) dx dy [dx dy ...]";
+    int pts = 0;
+    for (;;) {
+      p = end;
+      long dx = strtol(p, &end, 10);
+      if (end == p) break;
+      p = end;
+      long dy = strtol(p, &end, 10);
+      if (end == p) return "err odd delta count";
+#if POINTER_ABS
+      moveAbs(absX + dx * ABS_PER_UNIT, absY + dy * ABS_PER_UNIT);
+#else
+      mouse.move(constrain(dx, -127L, 127L), constrain(dy, -127L, 127L));
+#endif
+      pts++;
+      if (dt) delay(dt);
+    }
+    return pts ? "ok " + String(pts) : "err no deltas";
+  }
   if (cmd == "trace") {  // trace DT_MS x1 y1 x2 y2 ...: one absolute report per point, DT_MS apart (abs build)
 #if POINTER_ABS
     const char *p = arg.c_str();

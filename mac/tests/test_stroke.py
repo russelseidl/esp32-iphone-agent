@@ -11,7 +11,7 @@ def simulate(plan, curve, origin):
     x, y = origin
     pts = []
     for dx, dy in plan.reports:
-        mag = math.hypot(dx, dy)
+        mag = math.floor(math.hypot(dx, dy))  # iOS floors the velocity before the curve lookup
         g = curve.gain(mag)
         x, y = x + dx * g, y + dy * g
         pts.append((x, y))
@@ -76,5 +76,12 @@ def test_score_measures_deviation_and_coverage():
 def test_planner_never_emits_dead_zone_reports():
     path = [(0.0, 0.0), (120.0, 7.0)]
     plan = plan_path(path, ACCEL, px_per_report=3.5)
-    assert plan.reports and all(math.hypot(dx, dy) >= 2 for dx, dy in plan.reports)
+    assert plan.reports and all(math.floor(math.hypot(dx, dy)) >= 2 for dx, dy in plan.reports)
     assert math.dist(plan.end, path[-1]) < 2.0
+
+
+def test_travel_uses_the_floored_magnitude():
+    from stroke import _travel
+    # (2,2) has magnitude 2.83: iOS uses the step-2 gain for both axes
+    assert _travel(ACCEL, 2, 2) == (2 * ACCEL.gain(2), 2 * ACCEL.gain(2))
+    assert _travel(ACCEL, 1, 1) == (0.0, 0.0)  # floor(1.41) = 1: dead

@@ -50,6 +50,20 @@ arduino-esp32 3.3.12 USBHIDAbsoluteMouse (TinyUSB ABSMOUSE descriptor); Freeform
 Freeform's pen smoothing rounds corners and shrinks curves slightly; the pointer itself ends 3-4 px from
 its predicted position after 200-300 reports (about 1% accumulated model error).
 
+### Task 4b: Floored velocity and planned corrections (done)
+
+- [x] Apple floors the velocity before the curve lookup; measured: a (2,2) report travels 3.53 px per axis
+  (the step-2 gain), not the interpolated 3.64. `_travel` now floors the magnitude. y and x gains agree within
+  0.5% (no anisotropy).
+- [x] Field, 2 px per report: circle centre line 0.5 px (coverage 1.0), zigzag 1.1, signature 1.1, square
+  1.0; pointer closure on open paths 0.4-0.7 px (closed shapes end on their own ink, which disturbs the
+  finder: not reported there).
+- [x] Precise taps correct their miss with planned reports through the curve: 1.8-2.2 units (0.2%) mean
+  error, 0 misses; plain 15.9. `rtrace DT dx dy ...` batches reports in the firmware (compiled, flash
+  pending); the Mac falls back to one `move` per report on older firmware.
+- [x] A finder misread (the clock ticking over at 18:01) had been fed to the map's learn step and pulled it 40
+  units; learning now ignores landings over 100 units off, and the finder ignores the status bar.
+
 ### Task 5: Absolute pointer firmware (built, not flashed)
 
 - [x] `hardware/flash.sh --abs` -> `-DPOINTER_ABS=1`: `USBHIDAbsoluteMouse`, commands `abs X Y`,

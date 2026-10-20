@@ -43,6 +43,8 @@ New:
   as an absolute-coordinate mouse; iOS puts the AssistiveTouch pointer where the report says). In that build
   `move DX DY` is emulated as one report of 45 absolute units per unit (about 1 px per unit on the mirror) and
   `home` goes to (0, 0).
+- `rtrace DT_MS dx1 dy1 dx2 dy2 ...` — one relative report per pair (each delta -127..127), DT_MS (0-50)
+  apart; about 60 pairs fit one command. Replies `ok <reports>`. Planned strokes use it with the button held.
 - `trace DT_MS x1 y1 x2 y2 ...` — one absolute report per point, DT_MS (0-50) apart; about 40 points fit one
   command. Replies `ok <points>`. For strokes with the button held (`press` before, `release` after).
 When the link drops, the board releases all buttons/keys (same as before).
