@@ -161,3 +161,8 @@ A plain absolute tap is as accurate as a corrected one (the first look already r
 
 Same fidelity as the planned relative strokes, 3-5x faster, no acceleration model involved. The residual
 ~1 px is the mirror's resolution plus Freeform's smoothing.
+
+Gestures in absolute mode: Home, Back (Messages thread -> list), `open_app` (Freeform, Messages) and the App
+Switcher all verified from frames. The switcher needs the held drag slow (10-unit steps, 8 ms apart, 0.5 s
+pause before release); the instant flick reads as Home. Task 6 complete. The relative build stays available
+as `flash.sh --log` with the curve planner; the absolute build is the one to run.
