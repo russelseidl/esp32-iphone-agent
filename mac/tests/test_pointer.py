@@ -67,3 +67,11 @@ def test_scale_keeps_fractions():
     b = Frame.from_jpeg(frame(pointer=(124, 200)).jpeg, scale=2)
     (ox, oy), _ = locate(a, b, nudge_sign=+1)
     assert abs(ox - 100 / 240) < 0.03 and abs(oy - 200 / 520) < 0.03
+
+
+def test_locate_ignores_the_status_bar():
+    # the clock's digits changing at the top of the screen look like a nudged blob pair; they are not the pointer
+    a, b = frame(pointer=(100, 20)), frame(pointer=(120, 20))
+    assert locate(a, b, nudge_sign=+1) is None
+    a, b = frame(pointer=(100, 200)), frame(pointer=(120, 200))
+    assert locate(a, b, nudge_sign=+1) is not None

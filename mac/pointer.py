@@ -66,13 +66,18 @@ def _centre(ps, w, h):
     return (sum(p[0] for p in ps) / len(ps) + 0.5) / w, (sum(p[1] for p in ps) / len(ps) + 0.5) / h
 
 
+STATUS_BAR = 0.06  # top share of the screen ignored by the finder: the clock's minute digits change there
+
+
 def locate(a: Frame, b: Frame, nudge_sign: int,
            nudge_frac: tuple[float, float] = (0.02, 0.2)) -> tuple[tuple[float, float], tuple[float, float]] | None:
     """Pointer centre before (in a) and after (in b) a horizontal nudge in direction nudge_sign (+1 right).
     Both as screen fractions (0..1). The change must contain two similar small blobs on one row, separated
-    horizontally by a nudge-sized gap; anything else that changed (a clock hand, a badge) is ignored. None if
-    no such pair exists or the screen changed too much."""
-    pts = _changed(a, b)
+    horizontally by a nudge-sized gap; anything else that changed (a clock hand, a badge) is ignored, and so
+    is the status bar (the clock ticking over was once taken for the pointer). None if no such pair exists
+    or the screen changed too much."""
+    top = int(STATUS_BAR * a.h)
+    pts = [p for p in _changed(a, b) if p[1] >= top]
     n = len(pts)
     if n < MIN_PIXELS or n > MAX_PIXELS_FRAC * a.w * a.h:
         return None

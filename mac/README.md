@@ -57,6 +57,9 @@ use), runs the server from it as a user launchd agent serving MCP over HTTP on `
 | `open_app name` | Home → Search → type → Enter, verified by the screen changing; prefer it to hunting icons |
 | `search_in_app text [app]` | Cmd+K / Cmd+F when the app honours it (learned per app), then types |
 | `raw` | any protocol line from `docs/ble-protocol.md` |
+| `draw(points, space, px_per_report)` | A continuous stroke through a polyline (screen units or mirror px) with the button held: planned through the measured acceleration curve (relative build) or sent as absolute points (abs build) |
+| `stroke_bench(shapes, size_px, px_per_report, undo)` | Draws line, diag, square, circle, zigzag, signature in a blank Freeform board (pen selected), scores the ink against the path (centre-line deviation, coverage) and the pointer's own closure error; frames under `~/.esp32-agent/strokes/` |
+| `measure_curve(steps, travel_px)` | Measures px per HID report vs step size with the pointer finder (relative build); `~/.esp32-agent/curve.json` |
 | `bench [axes] [taps_per_setting]` | A/B trials in a blank Freeform board: ranks settings (aim, pace, coex; res and fps need a mirroring restart) by tap error, then latency; writes `~/.esp32-agent/bench/<date>.md` |
 | `diagnostics` | last N telemetry events (commands, frames, link, board log, recoveries) and counters |
 | `usb_reset`, `pace` | re-enumerate the board on the phone; set pointer move pacing |
@@ -114,3 +117,16 @@ passcode screen, Apple Pay or DRM video; mirroring stops when the phone locks; k
 portrait only. The relative pointer drifts, so the server re-homes it every 10 gestures; if taps land off,
 re-run the calibration. The board can hold one BLE central at a time per the app's expectations; close the iOS
 app's connection if you use both.
+
+## Precise strokes and the absolute build
+
+iOS scales every relative mouse report by a gain that depends on the report's step size only (not on timing;
+reports below 2 units move nothing). `measure_curve` tabulates that gain and `draw` plans a stroke through it
+with error diffusion: straight strokes follow their path to about a pixel, curves to about two (the app's own
+smoothing included), and the pointer drifts about 1% of the path length over a long stroke.
+
+The absolute build (`hardware/flash.sh --log --abs`) removes the model entirely: the board enumerates as an
+absolute-coordinate mouse and the AssistiveTouch pointer goes where the `abs X Y` report says. The server
+notices (`status.pointer` = `abs`), fits a linear map with `calibrate_auto` (`~/.esp32-agent/absmap.json`) and
+every tool keeps working: taps are coordinates, strokes are `trace` batches, gestures are edge flicks. Portrait
+only (an iPhone pointer bug maps landscape wrongly).

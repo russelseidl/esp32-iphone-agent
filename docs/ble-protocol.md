@@ -39,6 +39,12 @@ New:
 - `pace STEP STEP_MS` — pointer move pacing: 1-127 units per report, 1-50 ms between reports (not stored).
 - `usbreset` — replies `ok`, then disconnects and reconnects the USB device so the phone re-enumerates it
   (clears a stuck mouse button).
+- `abs X Y` — absolute pointer position, 0..32767 per axis (the `flash.sh --abs` build only, which enumerates
+  as an absolute-coordinate mouse; iOS puts the AssistiveTouch pointer where the report says). In that build
+  `move DX DY` is emulated as one report of 45 absolute units per unit (about 1 px per unit on the mirror) and
+  `home` goes to (0, 0).
+- `trace DT_MS x1 y1 x2 y2 ...` — one absolute report per point, DT_MS (0-50) apart; about 40 points fit one
+  command. Replies `ok <points>`. For strokes with the button held (`press` before, `release` after).
 When the link drops, the board releases all buttons/keys (same as before).
 
 ## status (JSON, one notify per second, must fit one MTU; keep short keys)
@@ -53,7 +59,8 @@ When the link drops, the board releases all buttons/keys (same as before).
 `ble.drop` = video notifies given up, `ble.rdrop` = replies that never reached a subscribed peer (should stay 0),
 `ble.n` = connected centrals.
 `hid.fail` = HID reports that never went out (release not confirmed), `hid.rel` = release retries that were
-needed, `logdrop` = board log lines dropped by the rate limit.
+needed, `ptr` = `rel` (relative mouse) or `abs` (absolute build), `logdrop` = board log lines dropped by the
+rate limit.
 
 Send priority: replies and status are queued and always go out before further video; video keeps at most
 ~8 ACL packets (~2 KB) in the controller, so a reply waits behind at most that much video. In `stream on`,

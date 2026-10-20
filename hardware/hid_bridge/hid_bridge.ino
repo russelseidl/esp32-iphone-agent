@@ -32,13 +32,32 @@ const int HOME_REPORTS = 50;
 
 const int WATCHDOG_MS = 8000;  // a hung loop (e.g. blocked USB) reboots the board instead of staying offline
 
+#ifndef POINTER_ABS
+#define POINTER_ABS 0  // flash.sh --abs: enumerate as an absolute-coordinate mouse (0..32767 per axis). iOS puts the
+#endif                 // AssistiveTouch pointer where the report says: no acceleration, no dead reckoning.
+#if POINTER_ABS
+USBHIDAbsoluteMouse mouse;
+const long ABS_MAX = 32767;
+const long ABS_PER_UNIT = 45;  // `move dx dy` emulation: ~1 px per unit across a 718 px mirror (nudges, keep-awake)
+static long absX = ABS_MAX / 2, absY = ABS_MAX / 2;
+static void moveAbs(long x, long y) {
+  absX = constrain(x, 0L, ABS_MAX);
+  absY = constrain(y, 0L, ABS_MAX);
+  mouse.move((int16_t)absX, (int16_t)absY);
+}
+#else
 USBHIDMouse mouse;
+#endif
 USBHIDKeyboard keyboard;
 USBHIDConsumerControl consumer;
 const uint16_t AC_HOME = 0x0223;  // HID consumer page: AC Home
 static String receiverName = "ESP32 Agent";
 
 void movePaced(long dx, long dy) {
+#if POINTER_ABS
+  moveAbs(absX + dx * ABS_PER_UNIT, absY + dy * ABS_PER_UNIT);  // one report; the pace is irrelevant here
+  return;
+#endif
   while (dx || dy) {
     int sx = constrain(dx, -STEP, STEP), sy = constrain(dy, -STEP, STEP);
     mouse.move(sx, sy);
@@ -91,7 +110,11 @@ bool usbReady() {
 // it within 100 ms; iOS then keeps the button held and every later move becomes a drag. Resend the
 // all-up report until the HID layer confirms delivery.
 static bool sendMouseUp(void *) {
+#if POINTER_ABS
+  hid_abs_mouse_report_t r = {.buttons = 0, .x = (int16_t)absX, .y = (int16_t)absY, .wheel = 0, .pan = 0};
+#else
   hid_mouse_report_t r = {.buttons = 0, .x = 0, .y = 0, .wheel = 0, .pan = 0};
+#endif
   return mouse.sendReport(r);
 }
 static void hidWait(int ms) { delay(ms); }
@@ -115,15 +138,51 @@ String run(const String &line) {
   String cmd = sp < 0 ? line : line.substring(0, sp);
   String arg = sp < 0 ? "" : line.substring(sp + 1);
   long a = 0, b = 0;
-  sscanf(arg.c_str(), "%ld %ld", &a, &b);
+  int n = sscanf(arg.c_str(), "%ld %ld", &a, &b);
 
   if (cmd == "ping") return "ok";
   if (!usbReady()) return "err phone usb asleep (unlock the phone)";
   if (cmd == "home") {  // slam the pointer into the top-left corner
+#if POINTER_ABS
+    moveAbs(0, 0);
+#else
     for (int i = 0; i < HOME_REPORTS; i++) { mouse.move(-127, -127); delay(2); }
+#endif
     return "ok";
   }
   if (cmd == "move") { movePaced(a, b); return "ok"; }
+  if (cmd == "abs") {  // absolute pointer position, 0..32767 per axis (the absolute build only)
+#if POINTER_ABS
+    if (n < 2) return "err usage: abs X Y";
+    moveAbs(a, b);
+    return "ok";
+#else
+    return "err abs needs the absolute build (flash.sh --abs)";
+#endif
+  }
+  if (cmd == "trace") {  // trace DT_MS x1 y1 x2 y2 ...: one absolute report per point, DT_MS apart (abs build)
+#if POINTER_ABS
+    const char *p = arg.c_str();
+    char *end;
+    long dt = strtol(p, &end, 10);
+    if (end == p || dt < 0 || dt > 50) return "err usage: trace DT_MS(0-50) x y [x y ...]";
+    int pts = 0;
+    for (;;) {
+      p = end;
+      long x = strtol(p, &end, 10);
+      if (end == p) break;
+      p = end;
+      long y = strtol(p, &end, 10);
+      if (end == p) return "err odd coordinate count";
+      moveAbs(x, y);
+      pts++;
+      if (dt) delay(dt);
+    }
+    return pts ? "ok " + String(pts) : "err no points";
+#else
+    return "err trace needs the absolute build (flash.sh --abs)";
+#endif
+  }
   if (cmd == "press") { mouse.press(MOUSE_LEFT); return "ok"; }
   if (cmd == "release") { releaseMouse(); return "ok"; }
   if (cmd == "click") { mouse.press(MOUSE_LEFT); delay(60); releaseMouse(); return "ok"; }
@@ -228,13 +287,13 @@ String statusJson(bool full) {
            "{\"up\":%lu,\"rst\":\"%s\",\"heap\":%u,\"psram\":%u,\"usb\":\"%s\",\"net\":\"%s\",\"ip\":\"%s\",\"sta\":%d,"
            "\"ap\":\"%s\",\"w\":%u,\"h\":%u,\"kbps\":%lu,\"fps\":%.1f,\"idr\":%lu,\"gop\":%lu,"
            "\"ble\":{\"mtu\":%u,\"phy\":%u,\"kbps\":%lu,\"drop\":%lu,\"rdrop\":%lu,\"n\":%d},"
-           "\"hid\":{\"fail\":%lu,\"rel\":%lu},\"logdrop\":%lu}",
+           "\"hid\":{\"fail\":%lu,\"rel\":%lu},\"ptr\":\"%s\",\"logdrop\":%lu}",
            millis(), resetReason(), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), usbState(), net_mode(), net_ip().c_str(), net_peers(),
            apStates[airplay_state()], cfg_width(), cfg_height(), (unsigned long)v.kbps, v.fps, (unsigned long)v.idr_ms,
            (unsigned long)v.gop_bytes, ble_mtu(), ble_phy(), (unsigned long)ble_kbps(), (unsigned long)ble_drops(),
            (unsigned long)ble_reply_drops(), ble_peers(), (unsigned long)hidFail, (unsigned long)hidRel,
-           (unsigned long)boardLogDropped());
+           POINTER_ABS ? "abs" : "rel", (unsigned long)boardLogDropped());
   if (full) return s;
   // MTU below ~250 (before the MTU exchange): keep only the fields the app needs to stay alive
   snprintf(s, sizeof s, "{\"up\":%lu,\"rst\":\"%s\",\"usb\":\"%s\",\"net\":\"%s\",\"ap\":\"%s\",\"ble\":{\"mtu\":%u}}",

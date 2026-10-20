@@ -19,6 +19,7 @@ mouse units, re-homes it in the top-left corner now and then, and needs a one-ti
 import asyncio
 import json
 import logging
+import math
 import os
 import shutil
 import struct
@@ -32,12 +33,14 @@ from pathlib import Path
 from bleak import BleakClient, BleakScanner
 from mcp.server.mcpserver import MCPServer, Image
 
+from absmap import ABS_MAX, AbsMap, fit as fit_abs
 from apps import AppNotes
 from bench import Trial, find_dots, match_dots, pick_winners, summarize, to_markdown
 from calibration import Calibration
 from pointer import Frame, changed_fraction, locate
 from screen import keyboard_visible
 from spool import Spool
+from stroke import Curve, ink_pixels, plan_path, score as stroke_score
 from telemetry import Telemetry
 from watchdog import StuckDetector, backoff
 
@@ -52,6 +55,9 @@ START, END, IDR, CONFIG, BENCH, SNAP = 1, 2, 4, 8, 16, 32
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 HOME = Path(os.environ.get("ESP32_AGENT_HOME", "~/.esp32-agent")).expanduser()
 CAL_FILE = HOME / "calibration.json"
+ABS_FILE = HOME / "absmap.json"     # absolute-pointer map (the --abs firmware build)
+CURVE_FILE = HOME / "curve.json"   # px per report vs step size (measure_curve)
+STROKES = HOME / "strokes"         # frames from stroke_bench
 TELEMETRY = Telemetry(HOME / "telemetry.jsonl")
 NOTES = AppNotes(HOME / "apps.json")
 SCAN_TIMEOUT = float(os.environ.get("ESP32_AGENT_SCAN", "15"))
@@ -593,6 +599,7 @@ class Phone:
     """Touch-like gestures from relative mouse moves (ported from the legacy server/hidagent/phone.py)."""
 
     def __init__(self, link: Link):
+        self.absmap = AbsMap.load(ABS_FILE)
         self.link = link
         self.cal = Calibration.from_dict(json.loads(CAL_FILE.read_text()) if CAL_FILE.exists() else None)
         self._pos = None
@@ -600,7 +607,112 @@ class Phone:
         self._link = 0
 
     @property
+    def abs_mode(self) -> bool:
+        """The board enumerates as an absolute-coordinate mouse (flash.sh --abs): the pointer goes where told."""
+        return self.link.status.get("ptr") == "abs"
+
+    def _abs(self, x: float, y: float) -> tuple[int, int]:
+        return self.absmap.abs("x", x / 1000), self.absmap.abs("y", y / 1000)
+
+    async def abs_point(self, x: float, y: float):
+        ax, ay = self._abs(x, y)
+        await self.link.cmd(f"abs {ax} {ay}")
+        self._pos = None
+
+    async def abs_tap(self, x, y, precise: bool = False, dab: bool = False):
+        await self.abs_point(x, y)
+        ax, ay = self._abs(x, y)
+        if precise:
+            found = await self.link.find_pointer(nudge=self.nudge_units())
+            if found is not None:
+                fx, fy = found[0] * 1000, found[1] * 1000
+                miss = ((fx - x) ** 2 + (fy - y) ** 2) ** 0.5
+                TELEMETRY.event("aim", aimed=[x, y], landed=[round(fx), round(fy)], miss=round(miss, 1), mode="abs")
+                if miss > 4:
+                    ax += round((x - fx) / 1000 / self.absmap.ax)
+                    ay += round((y - fy) / 1000 / self.absmap.ay)
+                    ax, ay = max(0, min(ABS_MAX, ax)), max(0, min(ABS_MAX, ay))
+                    await self.link.cmd(f"abs {ax} {ay}")
+        if dab:
+            d = max(1, round(0.015 / self.absmap.ax))  # ~1.5% of the width each way
+            await self.link.cmd("press")
+            try:
+                await self.link.cmd(f"abs {max(0, ax - d)} {max(0, ay - d)}")
+                await self.link.cmd(f"abs {min(ABS_MAX, ax + d)} {min(ABS_MAX, ay + d)}")
+                await self.link.cmd(f"abs {ax} {ay}")
+            finally:
+                await self.link.cmd("release")
+        else:
+            await self.link.cmd("click")
+        await asyncio.sleep(TAP_GAP)
+
+    def _abs_line(self, x1, y1, x2, y2, step_units: float = 8.0) -> list[tuple[int, int]]:
+        """Absolute points along a segment every `step_units` screen units (iOS wants motion, not a jump)."""
+        n = max(1, int(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 / step_units))
+        return [self._abs(x1 + (x2 - x1) * i / n, y1 + (y2 - y1) * i / n) for i in range(1, n + 1)]
+
+    async def abs_trace(self, pts: list[tuple[int, int]], dt_ms: int = 4):
+        """Send absolute points as HID reports, batched per BLE command (about 40 per command)."""
+        for i in range(0, len(pts), 40):
+            chunk = pts[i:i + 40]
+            await self.link.cmd(f"trace {dt_ms} " + " ".join(f"{x} {y}" for x, y in chunk))
+
+    async def abs_drag(self, points, hold=True, step_units: float = 8.0, dt_ms: int = 4):
+        await self.abs_point(*points[0])
+        await self.link.cmd("press")
+        try:
+            pts = []
+            for (x1, y1), (x2, y2) in zip(points, points[1:]):
+                pts += self._abs_line(x1, y1, x2, y2, step_units)
+            await self.abs_trace(pts, dt_ms)
+            if hold:
+                await asyncio.sleep(HOLD)
+        finally:
+            await self.link.cmd("release")
+        self._pos = None
+
+    async def abs_edge_gesture(self, start, end, hold_s: float = 0.0):
+        """press at an edge, flick to `end` quickly, release (Home, Back, App Switcher)."""
+        await self.link.cmd("release")
+        await self.abs_point(*start)
+        await asyncio.sleep(0.15)
+        await self.link.cmd("press")
+        try:
+            await self.abs_trace(self._abs_line(start[0], start[1], end[0], end[1], step_units=25.0), dt_ms=2)
+            if hold_s:
+                await asyncio.sleep(hold_s)
+        finally:
+            await self.link.cmd("release")
+        self._pos = None
+
+    async def calibrate_abs(self) -> dict:
+        """Command a 3x3 grid of absolute positions, read each back with the pointer finder, fit the map."""
+        xs, ys = [], []
+        grid = (0.15, 0.5, 0.85)
+        missed = 0
+        guess = self.absmap
+        for fy in grid:
+            for fx in grid:
+                ax, ay = guess.abs("x", fx), guess.abs("y", fy)
+                await self.link.cmd(f"abs {ax} {ay}")
+                found = await self.link.find_pointer(near_right_edge=fx == grid[-1], nudge=self.nudge_units())
+                if found is None:
+                    missed += 1
+                    continue
+                xs.append((ax, found[0]))
+                ys.append((ay, found[1]))
+        if len(xs) < 4:
+            raise RuntimeError(f"only {9 - missed} of 9 grid points found; keep the screen still and retry")
+        self.absmap = fit_abs(xs, ys)
+        self.absmap.save(ABS_FILE)
+        TELEMETRY.event("calibrate", mode="abs", missed=missed, residual=self.absmap.residual, map=self.absmap.to_dict())
+        return {"mode": "abs", "grid_points_found": 9 - missed, "residual_frac": self.absmap.residual,
+                "map": self.absmap.to_dict()}
+
+    @property
     def calibrated(self) -> bool:
+        if self.abs_mode:
+            return True  # the default map spans the device range; calibrate_abs refines it
         return self.cal.ready
 
     @property
@@ -647,10 +759,14 @@ class Phone:
                 max(120, round((self.cal.units("y", 0.9) - self.cal.units("y", 0.1)) / 0.8)))
 
     def nudge_units(self) -> int:
+        if self.abs_mode:
+            return 30  # the abs build emulates `move` at ~1 px per unit
         return max(12, round(0.1 * self.span_units()[0]))  # ~10% of the width: clearly a different blob
 
     async def home(self):
         """Park the pointer on the left edge below the rounded corner, the origin of every tap."""
+        if self.abs_mode:
+            return
         await self.link.cmd(f"pace {HOME_PACE}")
         try:
             await self.link.cmd(HOME_CMD)
@@ -673,6 +789,8 @@ class Phone:
         """Put the pointer at x, y (0-1000) with one move from the homed corner. iOS ramps each separate move
         up, losing a near-constant 10-20 units at its start, so a chain of relative moves drifts; one move from
         a known corner is what the calibration measured and lands the same way every time."""
+        if self.abs_mode:
+            return await self.abs_point(x, y)
         if not self.calibrated:
             raise RuntimeError("pointer not calibrated: run calibrate_auto")
         await self.link.cmd("release")
@@ -681,6 +799,10 @@ class Phone:
         await self._move_to(self._dx(x), self._dy(y), rehome=False)
 
     async def reset(self):
+        if self.abs_mode:
+            self._pos = None
+            await self.link.cmd("release")
+            return
         self._pos = None
         await self.link.cmd("release")
         await self.home()
@@ -689,6 +811,10 @@ class Phone:
     async def edge_home(self):
         """The iOS Home gesture from the bottom edge, independent of calibration: pin the pointer to the bottom,
         press, flick up, release; then re-home the tracker."""
+        if self.abs_mode:
+            await self.abs_edge_gesture((500, 999), (500, 450))
+            await asyncio.sleep(0.6)
+            return
         w, h = self.span_units()
         await self.link.cmd("release")
         await self.link.cmd(f"pace {HOME_PACE}")
@@ -705,6 +831,8 @@ class Phone:
 
     async def edge_back(self):
         """iOS back: a flick from the pinned left edge rightwards."""
+        if self.abs_mode:
+            return await self.abs_edge_gesture((0, 500), (450, 500))
         w, h = self.span_units()
         await self.link.cmd("release")
         await self.link.cmd(f"pace {HOME_PACE}")
@@ -720,6 +848,8 @@ class Phone:
 
     async def app_switcher(self):
         """Drag up from the bottom edge and hold before releasing: the App Switcher."""
+        if self.abs_mode:
+            return await self.abs_edge_gesture((500, 999), (500, 500), hold_s=0.5)
         w, h = self.span_units()
         await self.link.cmd("release")
         await self.link.cmd(f"pace {HOME_PACE}")
@@ -739,6 +869,8 @@ class Phone:
         """Home, visit a 3x3 grid, find the pointer at each stop, fit the piecewise map for both axes. The grid
         is aimed with the previous map; when that map was for another pace or home it lands short of the far
         edge (measured: 0.75 instead of 0.85), so a second pass with the new map runs when coverage is short."""
+        if self.abs_mode:
+            return await self.calibrate_abs()
         default = Calibration.from_dict({"w": 269, "h": 618})
         try:
             result = await self._calibrate_pass(self.cal if self.cal.ready else default, self.nudge_units())
@@ -802,6 +934,8 @@ class Phone:
         """dab: instead of a click, press and stroke the pointer 8 units out and back so a drawing tool leaves
         a mark centred on the aim (a plain click in Freeform's pen draws nothing visible, and a 2-unit wiggle
         is mostly swallowed by iOS pointer acceleration; measured 2026-10-19)."""
+        if self.abs_mode:
+            return await self.abs_tap(x, y, precise, dab)
         await self.point(x, y)
         if precise:
             found = await self.link.find_pointer(near_right_edge=x > 900, nudge=self.nudge_units())
@@ -836,6 +970,14 @@ class Phone:
         await asyncio.sleep(TAP_GAP)
 
     async def long_press(self, x, y, seconds: float):
+        if self.abs_mode:
+            await self.abs_point(x, y)
+            await self.link.cmd("press")
+            try:
+                await asyncio.sleep(seconds)
+            finally:
+                await self.link.cmd("release")
+            return
         await self.point(x, y)
         await self.link.cmd("press")
         try:
@@ -844,6 +986,8 @@ class Phone:
             await self.link.cmd("release")
 
     async def drag(self, points, hold=True):
+        if self.abs_mode:
+            return await self.abs_drag(points, hold)
         await self.point(*points[0])
         await self.link.cmd("press")
         try:
@@ -910,6 +1054,7 @@ async def status() -> str:
     return json.dumps({"connected": True, "board": link.name, "status": st, "video": video,
                        "keep_awake": {"every_s": KEEP_AWAKE_S, "nudges": link.nudges},
                        "calibrated": phone.calibrated, "span": phone.span, "calibration_model": phone.cal.model,
+                       "pointer": "abs" if phone.abs_mode else "rel", "absmap_residual": phone.absmap.residual,
                        "hints": hints})
 
 
@@ -1291,6 +1436,186 @@ async def bench(axes: list[str] = ["aim", "pace", "coex"], taps_per_setting: int
     path = out / (time.strftime("%Y-%m-%d-%H%M") + ".md")
     path.write_text(f"# Bench {time.strftime('%Y-%m-%d %H:%M')}\n\n" + to_markdown(summary, winners))
     return json.dumps({"summary": summary, "winners": winners, "file": str(path)}, default=str)
+
+
+# ---- precise strokes ------------------------------------------------------------------------------------
+
+def _frame_px() -> tuple[int, int]:
+    """Mirror frame size in px (the drawing coordinate space)."""
+    fr = Frame.from_jpeg(link.decoder.png, scale=1)
+    return fr.w, fr.h
+
+
+def _load_curve() -> Curve:
+    if not CURVE_FILE.exists():
+        raise RuntimeError("no acceleration curve yet: run measure_curve (with a still screen, e.g. a blank Freeform board)")
+    return Curve.from_dict(json.loads(CURVE_FILE.read_text()))
+
+
+@mcp.tool()
+async def measure_curve(steps: str = "2,3,4,6,8,10,13,16,20,25,32,40,50,64,80,100,127", travel_px: int = 350) -> str:
+    """Measure iOS pointer acceleration: px one HID report travels as a function of its step size (mouse units).
+    For each step, moves the pointer right by N reports of that step twice (N and 2N, sized to travel about
+    `travel_px`) and reads the displacement with the pointer finder. Needs a still screen (a blank Freeform
+    board). Saves ~/.esp32-agent/curve.json, which `draw` and `stroke_bench` use. Takes 1-2 minutes."""
+    W, H = _frame_px()
+    rows = []
+    points = []
+    guess = _load_curve() if CURVE_FILE.exists() else Curve([(1, 1.8), (10, 22.0), (127, 500.0)])
+    for st in [int(x) for x in steps.split(",") if x.strip()]:
+        n1 = max(1, min(40, round(travel_px / 2 / max(1.0, guess.px(st)))))
+        per = []
+        for n in (n1, 2 * n1):
+            await phone.point(120, 300)  # a known start, clear of the corner, by the calibration
+            p0 = await link.find_pointer(nudge=phone.nudge_units())
+            if p0 is None:
+                rows.append({"step": st, "n": n, "err": "pointer not found at the start"})
+                continue
+            await link.cmd(f"pace {st} 4")
+            try:
+                await link.cmd(f"move {st * n} 0")
+            finally:
+                await link.cmd(f"pace {DEFAULT_PACE}")
+            p1 = await link.find_pointer(nudge=phone.nudge_units())
+            phone._pos = None
+            if p1 is None:
+                rows.append({"step": st, "n": n, "err": "pointer not found after the move"})
+                continue
+            px = (p1[0] - p0[0]) * W
+            rows.append({"step": st, "n": n, "px": round(px, 1), "px_per_report": round(px / n, 2)})
+            per.append(px / n)
+        if per:
+            points.append((st, sum(per) / len(per)))
+    if len(points) < 3:
+        return json.dumps({"error": "too few steps measured", "rows": rows})
+    curve = Curve(points)
+    CURVE_FILE.write_text(json.dumps({**curve.to_dict(), "measured": time.strftime("%Y-%m-%d %H:%M"), "frame": [W, H]}))
+    TELEMETRY.event("curve", points=curve.points)
+    return json.dumps({"curve": curve.points, "rows": rows, "file": str(CURVE_FILE)})
+
+
+async def _draw_px(path_px: list[tuple[float, float]], px_per_report: float) -> dict:
+    """Point at the path's start (verified), then press and trace the planned reports, one per report."""
+    W, H = _frame_px()
+    if phone.abs_mode:
+        return await _draw_px_abs(path_px, px_per_report)
+    curve = _load_curve()
+    x0, y0 = path_px[0]
+    await phone.point(x0 / W * 1000, y0 / H * 1000)
+    found = await link.find_pointer(nudge=phone.nudge_units())
+    if found is None:
+        raise RuntimeError("pointer not found at the stroke's start (is the screen still?)")
+    origin = (found[0] * W, found[1] * H)
+    plan = plan_path(path_px, curve, px_per_report=px_per_report, max_step=127, origin=origin)
+    await link.cmd("pace 127 1")  # every `move` below is exactly one HID report
+    t0 = time.monotonic()
+    await link.cmd("press")
+    try:
+        for dx, dy in plan.reports:
+            await link.cmd(f"move {dx} {dy}")
+    finally:
+        await link.cmd("release")
+        await link.cmd(f"pace {DEFAULT_PACE}")
+    phone._pos = None
+    return {"reports": len(plan.reports), "seconds": round(time.monotonic() - t0, 1), "origin_px": [round(v, 1) for v in origin],
+            "start_miss_px": round(math.dist(origin, path_px[0]), 1), "predicted_end_px": [round(v, 1) for v in plan.end],
+            "target_end_px": [round(v, 1) for v in path_px[-1]]}
+
+
+async def _draw_px_abs(path_px: list[tuple[float, float]], px_per_report: float) -> dict:
+    """Absolute build: the path's points become absolute reports every `px_per_report` px; no planning."""
+    W, H = _frame_px()
+    x0, y0 = path_px[0]
+    await phone.abs_point(x0 / W * 1000, y0 / H * 1000)
+    found = await link.find_pointer(nudge=phone.nudge_units())
+    origin = (found[0] * W, found[1] * H) if found else (x0, y0)
+    pts = []
+    for (x1, y1), (x2, y2) in zip(path_px, path_px[1:]):
+        n = max(1, int(math.dist((x1, y1), (x2, y2)) / max(0.5, px_per_report)))
+        for i in range(1, n + 1):
+            px, py = x1 + (x2 - x1) * i / n, y1 + (y2 - y1) * i / n
+            pts.append(phone._abs(px / W * 1000, py / H * 1000))
+    t0 = time.monotonic()
+    await link.cmd("press")
+    try:
+        await phone.abs_trace(pts, dt_ms=4)
+    finally:
+        await link.cmd("release")
+    phone._pos = None
+    return {"reports": len(pts), "seconds": round(time.monotonic() - t0, 1), "origin_px": [round(v, 1) for v in origin],
+            "start_miss_px": round(math.dist(origin, path_px[0]), 1), "predicted_end_px": [round(v, 1) for v in path_px[-1]],
+            "target_end_px": [round(v, 1) for v in path_px[-1]], "mode": "abs"}
+
+
+@mcp.tool()
+async def draw(points: list[list[float]], space: str = "units", px_per_report: float = 4.0) -> str:
+    """Draw a continuous stroke through `points` with the mouse button held: a polyline in screen units
+    (0-1000, `space`="units") or mirror pixels ("px"). Uses the measured acceleration curve (measure_curve)
+    so the trace follows the path to about a pixel. One HID report per `px_per_report` pixels of path."""
+    W, H = _frame_px()
+    pts = [(x / 1000 * W, y / 1000 * H) if space == "units" else (x, y) for x, y in points]
+    if len(pts) < 2:
+        return "refused: give at least two points"
+    r = await _draw_px(pts, px_per_report)
+    TELEMETRY.event("stroke", **{k: v for k, v in r.items() if k != "origin_px"})
+    return json.dumps(r)
+
+
+def _shape(name: str, size: float, cx: float, cy: float) -> list[tuple[float, float]]:
+    h = size / 2
+    if name == "line":
+        return [(cx - h, cy), (cx + h, cy)]
+    if name == "diag":
+        return [(cx - h, cy + h), (cx + h, cy - h)]
+    if name == "square":
+        return [(cx - h, cy - h), (cx + h, cy - h), (cx + h, cy + h), (cx - h, cy + h), (cx - h, cy - h)]
+    if name == "circle":
+        return [(cx + h * math.cos(2 * math.pi * i / 48), cy + h * math.sin(2 * math.pi * i / 48)) for i in range(49)]
+    if name == "zigzag":
+        return [(cx - h + size * i / 6, cy + (h if i % 2 else -h) * 0.6) for i in range(7)]
+    if name == "signature":  # a loopy wave, like a hand-written flourish
+        return [(cx - h + size * t, cy + h * 0.5 * math.sin(6 * math.pi * t) * (1 - 0.6 * t) + h * 0.3 * math.sin(2 * math.pi * t))
+                for t in [i / 60 for i in range(61)]]
+    raise ValueError(f"unknown shape {name}")
+
+
+@mcp.tool()
+async def stroke_bench(shapes: list[str] = ["line", "diag", "square", "circle", "zigzag", "signature"],
+                       size_px: int = 300, px_per_report: float = 4.0, undo: bool = True) -> str:
+    """Draw each shape in a blank Freeform board (pen selected), read the ink back from the next frame and
+    score it against the intended path: mean deviation (px), p95, coverage (share of the path with ink
+    within 2 px) and stray ink. Frames are saved under ~/.esp32-agent/strokes/. Undoes each shape after
+    scoring unless undo=false."""
+    W, H = _frame_px()
+    cx, cy = W / 2, H * 0.45
+    STROKES.mkdir(parents=True, exist_ok=True)
+    out = []
+    for name in shapes:
+        path = _shape(name, size_px, cx, cy)
+        before = Frame.from_jpeg((await link.frame())[0], scale=1)
+        t_board = link.board_now()
+        r = await _draw_px(path, px_per_report)
+        await link._fresh_frame(t_board + 300, wait_s=6)
+        await asyncio.sleep(0.8)
+        after = Frame.from_jpeg((await link.frame())[0], scale=1)
+        xs = [p[0] for p in path]
+        ys = [p[1] for p in path]
+        box = (int(min(xs)) - 40, int(min(ys)) - 40, int(max(xs)) + 40, int(max(ys)) + 40)
+        was = set(ink_pixels(before.gray, W, H, box=box))
+        ink = [p for p in ink_pixels(after.gray, W, H, box=box) if p not in was]
+        sc = stroke_score(ink, path)
+        end = await link.find_pointer(nudge=phone.nudge_units())  # the pointer's own closure error, app-independent
+        sc["pointer_end_miss_px"] = round(math.dist((end[0] * W, end[1] * H), path[-1]), 1) if end else None
+        sc["pointer_vs_predicted_px"] = round(math.dist((end[0] * W, end[1] * H), r["predicted_end_px"]), 1) if end else None
+        stamp = time.strftime("%H%M%S")
+        (STROKES / f"{stamp}-{name}.jpg").write_bytes(after.jpeg)
+        row = {"shape": name, **sc, **r}
+        out.append(row)
+        TELEMETRY.event("stroke", shape=name, **sc, reports=r["reports"], seconds=r["seconds"])
+        if undo:
+            await link.cmd("key cmd+z")
+            await asyncio.sleep(0.5)
+    return json.dumps(out)
 
 
 @mcp.tool()
